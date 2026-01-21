@@ -33,6 +33,7 @@ class SideButton;
 class Notebook;
 class wxBookCtrlBase;
 class wxProgressDialog;
+class ExpandButtonHolder;
 
 namespace Slic3r {
 
@@ -201,6 +202,8 @@ protected:
 public:
     MainFrame();
     ~MainFrame() = default;
+    
+    wxMenuItem* m_helio_menu_item { nullptr };  // Install/Uninstall Helio menu item (public for access from generate_help_menu lambda)
 
     //BBS GUI refactor
     enum TabPosition
@@ -423,6 +426,13 @@ public:
     SideButton* m_slice_option_btn{ nullptr };
     SideButton* m_print_btn{ nullptr };
     SideButton* m_print_option_btn{ nullptr };
+
+    // Helio button members
+    wxWindowID expand_program_id = wxNewId();
+    wxWindowID expand_helio_id = wxNewId();
+    wxStaticBitmap* split_line_icon{nullptr};
+    ExpandButtonHolder* expand_program_holder{nullptr};
+
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };
     bool get_enable_slice_status();
@@ -431,6 +441,7 @@ public:
     //BBS
     void update_side_button_style();
     void update_slice_print_status(SlicePrintEventType event, bool can_slice = true, bool can_print = true);
+    void UpdateHelioVisibility();  // Show/hide Helio button based on install state
 
 #ifdef __APPLE__
     std::unique_ptr<wxTaskBarIcon> m_taskbar_icon;

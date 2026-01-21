@@ -1,4 +1,7 @@
 #include "BBLTopbar.hpp"
+#include "HelioActivationDialog.hpp"
+#include "MsgDialog.hpp"
+#include "../Utils/HelioDragon.hpp"
 #include "wx/artprov.h"
 #include "wx/aui/framemanager.h"
 #include "wx/display.h"
@@ -12,6 +15,7 @@
 #include "PartPlate.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <iostream>
 #include <wx/dcgraph.h>
 #include "Notebook.hpp"
 #include "libslic3r/common_header/common_header.h"
@@ -264,6 +268,7 @@ enum CUSTOM_ID
     ID_TOOL_BAR = 3200,
     ID_AMS_NOTEBOOK,
     ID_UPLOAD3MF,
+    ID_HELIO,
     ID_MINBTN,
     //CX
     ID_3D = 4000,
@@ -679,6 +684,15 @@ void BBLTopbar::Init(wxFrame* parent)
 
     EnableUpload3mf();
 #endif
+
+    // Helio button (icon/behavior changes based on activation state)
+    wxBitmap helio_bitmap = create_scaled_bitmap("helio_icon", this, 24);
+    m_helio_btn = this->AddTool(ID_HELIO, "", helio_bitmap, _L("Helio Additive - Thermal Simulation"));
+    
+    wxBitmap helio_disable_bitmap = create_scaled_bitmap("helio_icon_disable", this, 24);
+    m_helio_btn->SetDisabledBitmap(helio_disable_bitmap);
+
+    this->AddSpacer(FromDIP(5));
 #ifdef __WIN32__
     wxBitmap iconize_bitmap = create_scaled_bitmap(is_dark ? "topbar_min" : "topbar_min_light", this, (TOPBAR_ICON_SIZE));
     wxAuiToolBarItem* iconize_btn    = this->AddTool(ID_MINBTN, "", iconize_bitmap);
@@ -711,6 +725,7 @@ void BBLTopbar::Init(wxFrame* parent)
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnDropdownToolItem, this, ID_TOP_DROPDOWN_MENU);
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnCalibToolItem, this, ID_CALIB);
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnUpload3mf, this, ID_UPLOAD3MF);
+    this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnHelioButton, this, ID_HELIO);
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnIconize, this, ID_MINBTN);
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnFullScreen, this, wxID_MAXIMIZE_FRAME);
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnCloseFrame, this, wxID_CLOSE_FRAME);
@@ -742,6 +757,9 @@ void BBLTopbar::Init(wxFrame* parent)
             wxGetApp().plater()->get_current_canvas3D()->force_set_focus();
         },
         ID_CONFIG_RELATE);
+
+    // Apply initial activation visibility.
+    UpdateHelioActivationButtons();
 }
 
 BBLTopbar::~BBLTopbar()
@@ -816,6 +834,70 @@ void BBLTopbar::EnableUpload3mf()
         Refresh();
     }
 #endif
+}
+
+void BBLTopbar::EnableHelioButton(bool enable)
+{
+    const bool installed = (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") == "true");
+    
+    // Ensure button visibility matches installed state
+    if (installed != m_helio_btn_shown) {
+        ShowHelioButton(installed);
+    }
+    
+    if (m_helio_btn && installed) {
+        this->EnableTool(m_helio_btn->GetId(), enable);
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] BBLTopbar::EnableHelioButton - enable: " << enable;
+        Refresh();
+    }
+}
+
+void BBLTopbar::ShowHelioButton(bool show)
+{
+    if (show == m_helio_btn_shown)
+        return;  // No change needed
+    
+    if (show) {
+        // Add the Helio button back
+        // Find the position right before the window controls (minimize, maximize, close on Windows)
+        // or at the end for other platforms
+        wxBitmap helio_bitmap = create_scaled_bitmap("helio_icon", this, 24);
+        m_helio_btn = this->AddTool(ID_HELIO, "", helio_bitmap, _L("Helio Additive - Thermal Simulation"));
+        
+        wxBitmap helio_disable_bitmap = create_scaled_bitmap("helio_icon_disable", this, 24);
+        m_helio_btn->SetDisabledBitmap(helio_disable_bitmap);
+        
+        // Rebind the event handler
+        this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnHelioButton, this, ID_HELIO);
+        
+        m_helio_btn_shown = true;
+    } else {
+        // Delete the Helio button
+        if (m_helio_btn) {
+            this->DeleteTool(ID_HELIO);
+            m_helio_btn = nullptr;
+        }
+        m_helio_btn_shown = false;
+    }
+    
+    Realize();
+    Refresh();
+}
+
+void BBLTopbar::UpdateHelioActivationButtons()
+{
+    const bool installed = (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") == "true");
+    
+    // Show or hide the button based on installed state
+    ShowHelioButton(installed);
+    
+    if (!installed || !m_helio_btn)
+        return;
+
+    // Installed - show with normal icon
+    m_helio_btn->SetBitmap(create_scaled_bitmap("helio_icon", this, 24));
+    SetToolShortHelp(ID_HELIO, _L("Helio Additive - Thermal Simulation"));
+    // Enable state will be controlled by EnableHelioButton based on slice result
 }
 bool BBLTopbar::GetSaveProjectItemEnabled()
 {
@@ -1267,6 +1349,55 @@ void BBLTopbar::OnIconize(wxAuiToolBarEvent& event)
 void BBLTopbar::OnUpload3mf(wxAuiToolBarEvent& event)
 {
     wxGetApp().open_upload_3mf();
+}
+
+void BBLTopbar::OnHelioButton(wxAuiToolBarEvent& event)
+{
+    BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] BBLTopbar::OnHelioButton clicked";
+    std::cerr << "[HELIO DEBUG] BBLTopbar::OnHelioButton clicked" << std::endl;
+
+    // Check if Helio is installed
+    const bool installed = (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") == "true");
+    if (!installed) {
+        // Button should be hidden when uninstalled, but just in case
+        return;
+    }
+    
+    // Check if PAT exists - if not, show activation flow
+    const std::string pat = Slic3r::HelioQuery::get_helio_pat();
+    if (pat.empty()) {
+        // No PAT - show activation dialog to claim one
+        HelioActivationDialog dlg(wxGetApp().GetTopWindow());
+        const int ret = dlg.ShowModal();
+        
+        // Check if PAT was obtained
+        const std::string new_pat = Slic3r::HelioQuery::get_helio_pat();
+        if (new_pat.empty()) {
+            // User cancelled or failed to get PAT
+            return;
+        }
+        
+        // PAT obtained - if user wants to run first optimization, continue below
+        if (!(ret == wxID_OK && dlg.should_run_first_optimization()))
+            return;
+    }
+    
+    // Check if slice result is valid before allowing Helio action
+    Plater* plater = wxGetApp().plater();
+    if (plater) {
+        // Check if slice result is valid
+        Slic3r::GUI::PartPlateList &part_plate_list = plater->get_partplate_list();
+        Slic3r::GUI::PartPlate *current_plate = part_plate_list.get_curr_plate();
+        if (!current_plate || !current_plate->is_slice_result_valid()) {
+            BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] BBLTopbar::OnHelioButton - slice result invalid, ignoring";
+            std::cerr << "[HELIO DEBUG] BBLTopbar::OnHelioButton - slice result invalid, ignoring" << std::endl;
+            return;
+        }
+        
+        wxCommandEvent evt(EVT_HELIO_INPUT_DLG);
+        evt.SetEventObject(plater);
+        wxPostEvent(plater, evt);
+    }
 }
 
 

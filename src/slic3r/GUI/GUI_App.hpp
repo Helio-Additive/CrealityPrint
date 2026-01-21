@@ -513,6 +513,11 @@ private:
     void            check_new_version_sf(bool show_tips = false, int by_user = 0);
     void            check_new_version_cx(bool show_tips = false, int by_user = 0);
     void            request_new_version(int by_user);
+
+    //for helio slice
+    bool            is_helio_enable();
+    void            request_helio_pat(std::function<void(std::string)> func);
+    void            request_helio_supported_data();
     void            enter_force_upgrade();
     void            set_skip_version(bool skip = true);
     void            no_new_version();

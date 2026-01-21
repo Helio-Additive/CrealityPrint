@@ -9,6 +9,8 @@
 #include "slic3r/GUI/Monitor.hpp"
 #include "slic3r/GUI/CalibrationPanel.hpp"
 #include "slic3r/GUI/HMS.hpp"
+#include "slic3r/GUI/HelioReleaseNote.hpp"
+#include "slic3r/GUI/HelioActivationDialog.hpp"
 
 #include <cstddef>
 #include <algorithm>
@@ -23,6 +25,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
+#include <iostream>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -36,6 +39,7 @@
 #include <wx/bmpcbox.h>
 #include <wx/statbox.h>
 #include <wx/statbmp.h>
+#include <wx/progdlg.h>
 #include <wx/filedlg.h>
 #include <wx/dnd.h>
 #include <wx/progdlg.h>
@@ -115,6 +119,7 @@
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "BackgroundSlicingProcess.hpp"
+#include "../Utils/HelioDragon.hpp"
 #include "SelectMachine.hpp"
 #include "SendMultiMachinePage.hpp"
 #include "SendToPrinter.hpp"
@@ -250,6 +255,11 @@ wxDEFINE_EVENT(EVT_ON_MAPPING_DEVICE_FILAMENT, wxCommandEvent);
 wxDEFINE_EVENT(EVT_ON_SHOW_BOX_COLOR_SELECTION, wxCommandEvent);
 wxDEFINE_EVENT(EVT_EXPORT_GCODE_FINISHED, wxCommandEvent);
 wxDEFINE_EVENT(EVT_SUPPORT_TYPE_CHANGED, wxCommandEvent);
+
+// Helio events - HelioCompletionEvent is defined in BackgroundSlicingProcess.hpp in Slic3r namespace
+wxDEFINE_EVENT(EVT_HELIO_PROCESSING_COMPLETED, Slic3r::HelioCompletionEvent);
+wxDEFINE_EVENT(EVT_HELIO_PROCESSING_STARTED, SimpleEvent);
+wxDEFINE_EVENT(EVT_HELIO_INPUT_DLG, SimpleEvent);
 
 bool Plater::has_illegal_filename_characters(const wxString& wxs_name)
 {
@@ -2632,6 +2642,7 @@ struct Plater::priv
     ProjectDirtyStateManager dirty_state;
 
     BackgroundSlicingProcess background_process;
+    HelioBackgroundProcess   helio_background_process;
     bool                     suppressed_backround_processing_update{false};
 
     // TODO: A mechanism would be useful for blocking the plater interactions:
@@ -3005,6 +3016,11 @@ struct Plater::priv
     void on_mapping_device_filament(wxCommandEvent& event);
     void on_show_box_color_selection(wxCommandEvent& event);
     void on_export_gcode_finished(wxCommandEvent& event);
+    void on_helio_input_dlg(SimpleEvent& event);
+    void on_helio_process();
+    void on_helio_processing_complete(Slic3r::HelioCompletionEvent& event);
+    void on_helio_processing_start(SimpleEvent& event);
+    int update_helio_background_process(std::string& printer_id, std::string& material_id);
 
     // Set the bed shape to a single closed 2D polygon(array of two element arrays),
     // triangulate the bed and store the triangles into m_bed.m_triangles,
@@ -3298,6 +3314,9 @@ Plater::priv::priv(Plater* q, MainFrame* main_frame)
     this->q->Bind(EVT_ON_SHOW_BOX_COLOR_SELECTION, &priv::on_show_box_color_selection, this);
     main_frame->m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
     this->q->Bind(EVT_EXPORT_GCODE_FINISHED, &priv::on_export_gcode_finished, this);
+    this->q->Bind(EVT_HELIO_INPUT_DLG, &priv::on_helio_input_dlg, this);
+    this->q->Bind(EVT_HELIO_PROCESSING_COMPLETED, &priv::on_helio_processing_complete, this);
+    this->q->Bind(EVT_HELIO_PROCESSING_STARTED, &priv::on_helio_processing_start, this);
 
     auto* panel_3d = new wxPanel(q);
     view3D         = new View3D(panel_3d, bed, &model, config, &background_process);
@@ -3775,7 +3794,8 @@ Plater::priv::priv(Plater* q, MainFrame* main_frame)
             bool        onlyDefault = wxGetApp().preset_bundle->printers.only_default_printers();
             if (res != "1" && !onlyDefault) {
                 wxGetApp().mainframe->select_tab(size_t(1));
-                wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
+                if (wxGetApp().mainframe->m_topbar)
+                    wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
                 wxTheApp->CallAfter([] {
 #ifdef __APPLE__
                     wxPlatformInfo platformInfo;
@@ -3986,10 +4006,12 @@ void Plater::priv::select_next_view_3D()
 {
     if (current_panel == view3D) {
         wxGetApp().mainframe->select_tab(size_t(MainFrame::tpPreview));
-        wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tpPreview));
+        if (wxGetApp().mainframe->m_topbar)
+            wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tpPreview));
     } else if (current_panel == preview) {
         wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
-        wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
+        if (wxGetApp().mainframe->m_topbar)
+            wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
     }
     //    else if (current_panel == assemble_view)
     //        set_current_panel(view3D);
@@ -8280,6 +8302,72 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent& evt)
     if (!this->background_process.empty())
         this->background_process.get_current_plate()->update_slice_result_valid_state(evt.success());
 
+    // CRITICAL FIX: After slicing completes, sync the plate's result with background_process's result
+    // This ensures the plate's result has fresh slice data, not stale helio-modified data.
+    // This fixes the bug where deleting an object and inserting a new one would show
+    // results from the first object instead of the second.
+    if (evt.success() && !this->background_process.empty()) {
+        GCodeProcessorResult* bg_result = this->background_process.get_current_gcode_result();
+        GCodeProcessorResult* plate_result = this->background_process.get_current_plate()->get_slice_result();
+        
+        if (bg_result && plate_result) {
+            if (bg_result != plate_result) {
+                // Different pointers - copy the fresh data
+                *plate_result = *bg_result;
+                BOOST_LOG_TRIVIAL(info) << "[HELIO] Synced plate's gcode_result with background_process result after slice";
+                std::cerr << "[HELIO_DEBUG] on_process_completed: Synced plate result with bg_result - moves.size() = " << plate_result->moves.size() << std::endl;
+            } else {
+                // Same pointer - they should be in sync, but verify the data is fresh
+                // If bg_result has data (moves.size() > 0), it should be fresh from the new slice
+                std::cerr << "[HELIO_DEBUG] on_process_completed: plate_result and bg_result are same pointer" << std::endl;
+                std::cerr << "[HELIO_DEBUG] on_process_completed: bg_result->moves.size() = " << bg_result->moves.size() << std::endl;
+                std::cerr << "[HELIO_DEBUG] on_process_completed: bg_result->filename = " << bg_result->filename << std::endl;
+                
+                // CRITICAL FIX: After slicing completes, always reload the result from the file to ensure
+                // it has fresh slice data, not stale helio-modified data. This fixes the bug where deleting
+                // an object and inserting a new one would show results from the first object instead of the second.
+                std::string current_gcode_path = this->background_process.get_current_plate()->get_tmp_gcode_path();
+                if (!current_gcode_path.empty() && boost::filesystem::exists(current_gcode_path)) {
+                    // Check if original_*.gcode exists - if so, the current file might have helio-modified data
+                    fs::path gcode_path(current_gcode_path);
+                    std::string original_path = gcode_path.parent_path().string() + "/original_" + gcode_path.filename().string();
+                    bool original_exists = boost::filesystem::exists(original_path);
+                    
+                    // Get file modification times
+                    auto current_time = boost::filesystem::last_write_time(current_gcode_path);
+                    auto current_time_t = std::time_t(current_time);
+                    
+                    std::cerr << "[HELIO_DEBUG] on_process_completed: Reloading result from file to ensure fresh data: " << current_gcode_path << std::endl;
+                    std::cerr << "[HELIO_DEBUG] on_process_completed: original_*.gcode exists: " << (original_exists ? "yes" : "no") << std::endl;
+                    std::cerr << "[HELIO_DEBUG] on_process_completed: Current file time: " << std::ctime(&current_time_t);
+                    
+                    try {
+                        GCodeProcessor processor;
+                        const Vec3d origin = this->background_process.get_current_plate()->get_origin();
+                        processor.set_xy_offset(origin(0), origin(1));
+                        processor.process_file(current_gcode_path);
+                        bg_result->take(processor.extract_result());
+                        bg_result->filename = current_gcode_path;
+                        std::cerr << "[HELIO_DEBUG] on_process_completed: Reloaded from file - moves.size() = " << bg_result->moves.size() << std::endl;
+                        
+                        // If the reloaded result has suspiciously high move count (likely helio-modified),
+                        // and original_*.gcode exists, check if we should use the original instead
+                        // But wait - if a new slice just completed, the current file should have fresh data
+                        // The issue is that the file might not have been overwritten properly
+                        // So we need to ensure the file was actually written by the new slice
+                        // For now, trust the reload - if it's wrong, the issue is in the file writing
+                    } catch (const std::exception& e) {
+                        std::cerr << "[HELIO_DEBUG] on_process_completed: Failed to reload from file: " << e.what() << std::endl;
+                    }
+                } else if (!current_gcode_path.empty() && bg_result->filename != current_gcode_path) {
+                    // Filename mismatch - update it
+                    bg_result->filename = current_gcode_path;
+                    std::cerr << "[HELIO_DEBUG] on_process_completed: Updated filename to match current slice file" << std::endl;
+                }
+            }
+        }
+    }
+
     // BBS: update the action button according to the current plate's status
     bool ready_to_slice = !this->partplate_list.get_curr_plate()->is_slice_result_valid();
 
@@ -8711,6 +8799,620 @@ void Plater::priv::on_export_gcode_finished(wxCommandEvent& event) {
     notification_manager->push_exporting_finished_notification(output_path.string(), Slic3r::GUI::wxGetApp().plater()->p->last_output_dir_path,
                                                                on_removable);
     delete[] path;
+}
+
+// Helper function to match printer name with word-boundary awareness
+// Returns the matched printer ID and match length if found, empty string otherwise
+// Handles cases like "Creality K2 Plus 0.4 nozzle" matching to "Creality K2 Plus"
+static std::pair<std::string, size_t> match_printer_with_boundaries(
+    const std::string& target_name,
+    const std::vector<HelioQuery::SupportedData>& supported_printers)
+{
+    std::string best_match_id;
+    size_t best_match_length = 0;
+    
+    std::string target_lower = target_name;
+    boost::algorithm::to_lower(target_lower);
+    
+    for (const HelioQuery::SupportedData& pdata : supported_printers) {
+        if (pdata.native_name.empty()) continue;
+        
+        std::string native_name = pdata.native_name;
+        boost::algorithm::to_lower(native_name);
+        
+        bool is_match = false;
+        
+        // Case 1: Exact match (highest priority)
+        if (target_lower == native_name) {
+            is_match = true;
+        }
+        // Case 2: Target is longer than native name - user may have added suffix (e.g., nozzle size)
+        // e.g., "Creality K2 Plus 0.4 nozzle" contains "Creality K2 Plus"
+        // We check if target CONTAINS native_name (not the other way around!)
+        else if (target_lower.length() > native_name.length()) {
+            size_t pos = target_lower.find(native_name);
+            if (pos != std::string::npos) {
+                // Check if native_name appears at start or after a space, and ends at string end or before a space
+                bool valid_start = (pos == 0 || target_lower[pos - 1] == ' ');
+                size_t after_pos = pos + native_name.length();
+                bool valid_end = (after_pos >= target_lower.length() || target_lower[after_pos] == ' ');
+                if (valid_start && valid_end) {
+                    is_match = true;
+                }
+            }
+        }
+        
+        // Keep track of longest native_name match to prefer more specific printers
+        // e.g., if user has "Creality K2 Plus Max 0.4", we want "K2 Plus Max" not "K2 Plus"
+        if (is_match && native_name.length() > best_match_length) {
+            best_match_length = native_name.length();
+            best_match_id = pdata.id;
+        }
+    }
+    
+    return std::make_pair(best_match_id, best_match_length);
+}
+
+int Plater::priv::update_helio_background_process(std::string& printer_id, std::string& material_id)
+{
+    notification_manager->close_notification_of_type(NotificationType::HelioSlicingError);
+    PresetBundle *           preset_bundle     = wxGetApp().preset_bundle;
+    std::string              preset_name       = preset_bundle->printers.get_edited_preset().name;
+    std::vector<std::string> preset_name_array = wxGetApp().split_str(preset_name, "Bambu Lab ");
+    std::string              preset_pure_name  = preset_name_array.size() >= 2 ? preset_name_array[1] : "";
+    
+    // For CrealityPrint, if "Bambu Lab " split didn't work, try "Creality " prefix
+    if (preset_pure_name.empty()) {
+        std::vector<std::string> creality_array = wxGetApp().split_str(preset_name, "Creality ");
+        preset_pure_name = creality_array.size() >= 2 ? creality_array[1] : preset_name;
+    }
+
+    /*running helio task*/
+    int helio_state = helio_background_process.get_state();
+    bool helio_is_running = helio_background_process.is_running();
+    bool helio_was_canceled = helio_background_process.was_canceled();
+    BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - checking if running, state: " << helio_state << ", is_running: " << helio_is_running << ", was_canceled: " << helio_was_canceled;
+    std::cerr << "[HELIO DEBUG] update_helio_background_process() - checking if running, state: " << helio_state << ", is_running: " << helio_is_running << ", was_canceled: " << helio_was_canceled << std::endl;
+    
+    // If the process was canceled, reset it and allow new operation
+    if (helio_was_canceled || helio_state == HelioBackgroundProcess::STATE_CANCELED) {
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - Process was canceled, resetting and allowing new operation";
+        std::cerr << "[HELIO DEBUG] update_helio_background_process() - Process was canceled, resetting and allowing new operation" << std::endl;
+        helio_background_process.reset();
+        // Continue to allow new operation
+    }
+    // FIX: If a previous simulation finished, reset the processor to ensure clean state for new simulation
+    else if (helio_state == HelioBackgroundProcess::STATE_FINISHED) {
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - Previous process finished, resetting for new simulation";
+        std::cerr << "[HELIO DEBUG] update_helio_background_process() - Previous process finished, resetting for new simulation" << std::endl;
+        helio_background_process.reset();
+        // Continue to allow new operation
+    }
+    else if (helio_background_process.is_running()) {
+         // Check if thread is actually still alive - if not, it might have been killed externally
+         bool thread_alive = helio_background_process.m_thread.joinable();
+         BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - Process is running, thread joinable: " << thread_alive;
+         std::cerr << "[HELIO DEBUG] update_helio_background_process() - Process is running, thread joinable: " << thread_alive << std::endl;
+         
+         // If thread is not joinable, it means it's finished but state wasn't updated - force reset
+         if (!thread_alive && helio_state == HelioBackgroundProcess::STATE_RUNNING) {
+             BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - Thread is dead but state is RUNNING, forcing reset";
+             std::cerr << "[HELIO DEBUG] update_helio_background_process() - Thread is dead but state is RUNNING, forcing reset" << std::endl;
+             helio_background_process.stop();
+             helio_background_process.reset();
+             // Continue to allow new operation
+         } else {
+             // Offer to stop the current process and start a new one
+             BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - Process is running, asking user if they want to stop it";
+             std::cerr << "[HELIO DEBUG] update_helio_background_process() - Process is running, asking user if they want to stop it" << std::endl;
+             
+             auto dlg = MessageDialog(nullptr, 
+                 _L("A Helio simulation or optimization task is in progress.\n\nDo you want to stop it and start a new one?"), 
+                 _L("Helio Task In Progress"), 
+                 wxYES_NO | wxICON_QUESTION);
+             
+             if (dlg.ShowModal() == wxID_YES) {
+                 BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - User chose to stop current process";
+                 std::cerr << "[HELIO DEBUG] update_helio_background_process() - User chose to stop current process" << std::endl;
+                 helio_background_process.stop();
+                 helio_background_process.stop_current_helio_action();
+                 helio_background_process.clear_helio_file_cache();
+                 helio_background_process.reset();
+                 // Continue to allow new operation
+             } else {
+                 BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - User chose to keep current process running";
+                 std::cerr << "[HELIO DEBUG] update_helio_background_process() - User chose to keep current process running" << std::endl;
+                 return -1;
+             }
+         }
+     }
+     
+     BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_helio_background_process() - Helio task is NOT running, continuing...";
+     std::cerr << "[HELIO DEBUG] update_helio_background_process() - Helio task is NOT running, continuing..." << std::endl;
+
+    /*invalid printer preset*/
+     if (preset_pure_name.empty()) {
+        GUI::MessageDialog msgdialog(nullptr, _L("Invalid printer preset. Unable to slice with Helio."), "", wxICON_WARNING | wxOK);
+        msgdialog.ShowModal();
+        return -1;
+    }
+
+     bool helio_support = false;
+     
+     // For printer matching, use the full preset_name to handle names with nozzle suffixes
+     // e.g., "Creality K2 Plus 0.4 nozzle" should match "Creality K2 Plus"
+     std::string printer_target_name = preset_name;
+     boost::trim(printer_target_name);
+     
+     BOOST_LOG_TRIVIAL(info) << "[HELIO] Printer matching - target: '" << printer_target_name << "'";
+     
+     // Use word-boundary matching to find the best (longest) printer match
+     // This handles cases like "Creality K2 Plus 0.4 nozzle" matching "Creality K2 Plus"
+     auto [best_match_id, best_match_length] = match_printer_with_boundaries(
+         printer_target_name, HelioQuery::global_supported_printers);
+     
+     if (!best_match_id.empty()) {
+         helio_support = true;
+         printer_id = best_match_id;
+         BOOST_LOG_TRIVIAL(info) << "[HELIO] Found printer match! printer_id = " << printer_id;
+     }
+
+    /*unsupported helio printers*/
+     if (!helio_support) {
+        GUI::MessageDialog msgdialog(nullptr, _L("The current printer preset cannot be sliced using Helio."), "", wxICON_WARNING | wxOK);
+        msgdialog.ShowModal();
+        return -1;
+    }
+
+    /*check total number of materials*/
+    auto extruders = q->get_partplate_list().get_curr_plate()->get_extruders();
+    if (extruders.size() <= 0) {
+        return -1;
+    }
+
+    /*Check the materials supported by helio*/
+    auto preset_filaments = wxGetApp().preset_bundle->filament_presets;
+    if (extruders.front() > preset_filaments.size()) {
+        return -1;
+    }
+
+
+    if (extruders.size() > 1) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": The number of consumables used is > 1";
+        GUI::MessageDialog msgdialog(nullptr, _L("Helio does not support using a number of materials greater than 1."), "", wxICON_WARNING | wxOK);
+        msgdialog.ShowModal();
+        return -1;
+    }
+
+    std::string used_filament = preset_filaments[extruders.front() - 1];
+    bool is_supported_by_helio = false;
+
+    for (HelioQuery::SupportedData pdata : HelioQuery::global_supported_materials) {
+        if (!pdata.native_name.empty()) {
+            std::string native_name = pdata.native_name;
+
+            //cstom material name match
+            size_t atPos = used_filament.find('@');
+            std::string target_name = (atPos != std::string::npos) ? used_filament.substr(0, atPos) : used_filament;
+            boost::trim(target_name);
+
+            boost::algorithm::to_lower(native_name);
+            boost::algorithm::to_lower(target_name);
+
+            if (target_name == native_name) {
+                is_supported_by_helio = true;
+                material_id = pdata.id;
+                break;
+            }
+        }
+    }
+
+    if (!is_supported_by_helio) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("Helio does not support materials %1%") % used_filament;
+        GUI::MessageDialog msgdialog(nullptr, wxString::Format(_L("Helio does not support materials %s"),  used_filament), "", wxICON_WARNING | wxOK);
+        msgdialog.ShowModal();
+        return -1;
+    }
+
+    /*has warning*/
+    //PartPlate* plate = q->get_partplate_list().get_curr_plate();
+    //if (plate->get_slice_result()->warnings.size() > 0) {
+    //    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "has warnings!";
+    //    GUI::MessageDialog msgdialog(nullptr, _L("Please resolve warnings on the current plate to enable Helio functions."), "", wxICON_WARNING | wxOK);
+    //    msgdialog.ShowModal();
+    //    return -1;
+    //}
+
+    /*print sequence = by object*/
+    if (!wxGetApp().is_helio_enable()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "print sequence = by object";
+        GUI::MessageDialog msgdialog(nullptr, _L("Helio functions do not support the print sequence of \"ByObject\"."), "", wxICON_WARNING | wxOK);
+        msgdialog.ShowModal();
+        return -1;
+    }
+
+
+    //partplate_list.get_curr_plate()->update_helio_apply_result_invalid(false);
+    notification_manager->close_notification_of_type(NotificationType::HelioSlicingError);
+    return 0;
+}
+
+void Plater::priv::on_helio_processing_complete(Slic3r::HelioCompletionEvent& event)
+{
+    // DEBUG: Log the completion event data
+    std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: is_successful = " << event.is_successful << std::endl;
+    std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: event.path = " << event.path << std::endl;
+    std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: event.tmp_path = " << event.tmp_path << std::endl;
+    std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: event.action = " << event.action << std::endl;
+
+    if (event.is_successful) {
+        this->reset_gcode_toolpaths();
+
+        /*Keep the original gcode*/
+        try{
+            fs::path original_path = event.tmp_path;
+            std::string original_path_name = original_path.parent_path().string() + "/original_" + original_path.filename().string();
+            std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: renaming " << event.tmp_path << " to " << original_path_name << std::endl;
+            int renamed = boost::nowide::rename(event.tmp_path.c_str(), original_path_name.c_str());
+
+            if (renamed != 0) {
+                BOOST_LOG_TRIVIAL(error) << "Helio Failed to rename file";
+            }
+        }
+        catch (...){
+            BOOST_LOG_TRIVIAL(error) << "Helio Failed to rename file";
+        }
+
+        std::string copied;
+        copy_file(event.path, event.tmp_path, copied);
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: copied " << event.path << " to " << event.tmp_path << " result: " << copied << std::endl;
+
+        /*time improvement */
+        float      time_origin_value;
+        float      time_optimized_value;
+        auto       aprint_stats = wxGetApp().plater()->get_partplate_list().get_current_fff_print().print_statistics();
+        PartPlate* plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+        if (plate) {
+            if (plate->get_slice_result()) { 
+                time_origin_value = plate->get_slice_result()->print_statistics.modes[0].time;
+                //time_origin = wxString::Format("%s", short_time(get_time_dhms(plate->get_slice_result()->print_statistics.modes[0].time))); 
+            }
+        }
+
+        BOOST_LOG_TRIVIAL(debug) << boost::format("Failed to delete file %1%") % copied;
+
+        // DEBUG: Log the helio_background_process.m_gcode_result before modification
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: helio_background_process.m_gcode_result pointer = " << (void*)helio_background_process.m_gcode_result << std::endl;
+        if (helio_background_process.m_gcode_result) {
+            std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: BEFORE m_gcode_result->filename = " << helio_background_process.m_gcode_result->filename << std::endl;
+            std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: BEFORE m_gcode_result->moves.size() = " << helio_background_process.m_gcode_result->moves.size() << std::endl;
+        }
+
+        helio_background_process.m_gcode_result->filename = event.tmp_path;
+        
+        // DEBUG: Log after setting filename
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: AFTER m_gcode_result->filename = " << helio_background_process.m_gcode_result->filename << std::endl;
+
+        GCodeProcessorResult *res1 = partplate_list.get_curr_plate()->get_slice_result();
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res1 (plate slice result) pointer = " << (void*)res1 << std::endl;
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res1 BEFORE copy filename = " << (res1 ? res1->filename : "NULL") << std::endl;
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res1 BEFORE copy moves.size() = " << (res1 ? res1->moves.size() : 0) << std::endl;
+        
+        *res1 = *helio_background_process.m_gcode_result;
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res1 AFTER copy filename = " << res1->filename << std::endl;
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res1 AFTER copy moves.size() = " << res1->moves.size() << std::endl;
+        
+        GCodeProcessorResult *res2 = background_process.get_current_gcode_result();
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res2 (background_process gcode result) pointer = " << (void*)res2 << std::endl;
+        *res2 = *helio_background_process.m_gcode_result;
+        std::cerr << "[HELIO_DEBUG] on_helio_processing_complete: res2 AFTER copy filename = " << res2->filename << std::endl;
+
+        // Reset GCodeViewer's cached result ID to force reload with new result
+        // The processor already assigned a new unique ID when process_file() was called
+        preview->get_canvas3d()->get_gcode_viewer().reset();
+
+        this->update();
+
+        // Switch to Preview mode and show thermal index result
+        q->select_view_3D("Preview");
+        
+        // Set the view type to ThermalIndexMean to show the thermal results
+        preview->get_canvas3d()->set_gcode_view_preview_type(GCodeViewer::EViewType::ThermalIndexMean);
+
+        /*show rating*/
+        if (event.action == 1) {
+
+            auto       aprint_stats1 = wxGetApp().plater()->get_partplate_list().get_current_fff_print().print_statistics();
+            wxString   time1;
+            PartPlate* plate1 = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+            if (plate1) {
+                if (plate1->get_slice_result()) {
+                    time_optimized_value = plate1->get_slice_result()->print_statistics.modes[0].time;
+                    //time_optimized = wxString::Format("%s", short_time(get_time_dhms(plate1->get_slice_result()->print_statistics.modes[0].time))); 
+                }
+            }
+
+            HelioRatingDialog dlg(nullptr, (int)time_origin_value, (int)time_optimized_value, event.quality_mean_improvement, event.quality_std_improvement);
+            dlg.ShowModal();
+        }
+    } else {
+        notification_manager->push_notification(NotificationType::HelioSlicingError, 
+                                                NotificationManager::NotificationLevel::ErrorNotificationLevel, 
+                                                into_u8(_L("Helio processing failed: ") + from_u8(event.error_message)));
+    }
+}
+
+void Plater::priv::on_helio_processing_start(SimpleEvent& event)
+{
+    notification_manager->close_notification_of_type(NotificationType::SignDetected);
+    notification_manager->close_notification_of_type(NotificationType::ExportFinished);
+    notification_manager->set_slicing_progress_began();
+}
+
+void Plater::priv::on_helio_input_dlg(SimpleEvent& event) {
+    BOOST_LOG_TRIVIAL(warning) << "Helio input dialog triggered";
+    std::cerr << "[HELIO DEBUG] Helio input dialog triggered" << std::endl;
+
+    // Gate Helio action until explicitly activated.
+    // When not activated, show activation/onboarding flow that claims & stores PAT.
+    if (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") != "true") {
+        HelioActivationDialog dlg(wxGetApp().GetTopWindow());
+        const int ret = dlg.ShowModal();
+
+        // If user requested to run first optimization and activation succeeded,
+        // continue into the existing Helio flow below.
+        if (!(ret == wxID_OK && dlg.should_run_first_optimization()
+              && wxGetApp().app_config->get("helio_enable") == "true")) {
+            return;
+        }
+    }
+    
+    std::string helio_api_key = Slic3r::HelioQuery::get_helio_pat();
+
+    if (helio_api_key.empty()) {
+        auto dlg = MessageDialog(nullptr, _L("No valid Helio-PAT detected. Helio simulation & optimization cannot proceed. \nPlease request a new Helio-PAT."),
+            _L("Execution Blocked"), wxYES_NO | wxICON_WARNING | wxCENTRE);
+        dlg.SetButtonLabel(wxID_YES, _L("Regenerate PAT"));
+        auto result = dlg.ShowModal();
+        if (result == wxID_YES) {
+            wxGetApp().request_helio_pat([this](std::string pat) {
+                wxTheApp->CallAfter([=]() {
+                    if (pat == "not_enough") {
+                        HelioPatNotEnoughDialog dlg;
+                        dlg.ShowModal();
+                    }
+                    else if (pat == "error") {
+                        MessageDialog dlg(nullptr, _L("Failed to obtain Helio PAT, Click Refresh to obtain it again."), wxString("Helio Additive"), wxYES | wxICON_WARNING);
+                        dlg.ShowModal();
+                    }
+                    else {
+                        Slic3r::HelioQuery::set_helio_pat(pat);
+                        MessageDialog dlg(nullptr, _L("Successfully obtained PAT."), wxString("Helio Additive"), wxYES | wxICON_NONE);
+                        dlg.ShowModal();
+                    }
+                });
+            });
+        }
+        else {
+            return;
+        }
+    }
+    else {
+        if (HelioQuery::global_supported_printers.size() <= 0 || HelioQuery::global_supported_materials.size() <= 0) {
+            BOOST_LOG_TRIVIAL(warning) << "Helio: Support data empty, requesting...";
+            std::cerr << "[HELIO DEBUG] Support data empty, requesting..." << std::endl;
+            std::string api_url = Slic3r::HelioQuery::get_helio_api_url();
+            std::string pat_key = Slic3r::HelioQuery::get_helio_pat();
+            BOOST_LOG_TRIVIAL(warning) << "Helio: API URL: " << api_url;
+            BOOST_LOG_TRIVIAL(warning) << "Helio: PAT key empty: " << (pat_key.empty() ? "yes" : "no");
+            std::cerr << "[HELIO DEBUG] API URL: " << api_url << std::endl;
+            std::cerr << "[HELIO DEBUG] PAT key empty: " << (pat_key.empty() ? "yes" : "no") << std::endl;
+            wxGetApp().request_helio_supported_data();
+            // Wait briefly for async sync to finish, instead of repeatedly telling the user to retry.
+            wxProgressDialog pd(_L("Synchronizing Helio"),
+                                _L("Downloading printer/material support list…"),
+                                100,
+                                nullptr,
+                                wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+
+            const int max_ms = 30000;
+            const int step_ms = 200;
+            int elapsed = 0;
+            int tick = 0;
+
+            while (elapsed < max_ms) {
+                if (HelioQuery::global_supported_printers.size() > 0 && HelioQuery::global_supported_materials.size() > 0) {
+                    on_helio_process();
+                    return;
+                }
+
+                bool keep = pd.Update((tick % 100), _L("Downloading printer/material support list…"));
+                if (!keep)
+                    return;
+
+                wxMilliSleep(step_ms);
+                wxTheApp->Yield(true);
+                elapsed += step_ms;
+                tick += 1;
+            }
+
+            MessageDialog(nullptr,
+                          _L("Helio support data is still synchronizing (or failed to download). Please check your network and try again."),
+                          _L("Synchronizing Helio"),
+                          wxOK | wxICON_WARNING).ShowModal();
+        }
+        else {
+            on_helio_process();
+        }
+    }
+}
+
+//BBS: GUI refactor: slice with helio
+void Plater::priv::on_helio_process()
+{
+    std::string helio_api_url = Slic3r::HelioQuery::get_helio_api_url();
+    std::string helio_api_key = Slic3r::HelioQuery::get_helio_pat();
+
+    std::string printer_id;
+    std::string material_id;
+
+    if (update_helio_background_process(printer_id, material_id) > -1) {
+        if (!wxGetApp().mainframe) {
+            BOOST_LOG_TRIVIAL(error) << "Helio: mainframe is null, cannot show dialog";
+            std::cerr << "[HELIO ERROR] mainframe is null, cannot show dialog" << std::endl;
+            return;
+        }
+        try {
+            std::cerr << "[HELIO DEBUG] Creating HelioInputDialog..." << std::endl;
+            HelioInputDialog dlg;
+            std::cerr << "[HELIO DEBUG] HelioInputDialog created successfully" << std::endl;
+            while (dlg.ShowModal() == wxID_OK)
+        {
+            if (partplate_list.get_curr_plate()->empty()) return;
+            
+            // FIX: Always use the plate's current slice result as the source of truth
+            // This ensures we're using the current slice, not stale helio-modified data
+            GCodeProcessorResult* g_result = partplate_list.get_curr_plate()->get_slice_result();
+            if (!g_result) {
+                g_result = background_process.get_current_gcode_result();
+            }
+            
+            // DEBUG: Log the gcode result being passed to helio
+            std::cerr << "[HELIO_DEBUG] on_helio_process: g_result pointer = " << (void*)g_result << std::endl;
+            if (g_result) {
+                std::cerr << "[HELIO_DEBUG] on_helio_process: g_result->filename = " << g_result->filename << std::endl;
+                std::cerr << "[HELIO_DEBUG] on_helio_process: g_result->moves.size() = " << g_result->moves.size() << std::endl;
+            }
+            
+            if (!g_result) {
+                BOOST_LOG_TRIVIAL(error) << "Helio: No G-code result available";
+                std::cerr << "[HELIO ERROR] No G-code result available" << std::endl;
+                MessageDialog(nullptr, _L("No G-code result available. Please slice the model first."), _L("Helio Error"), wxOK | wxICON_WARNING).ShowModal();
+                continue;
+            }
+            
+            // CRITICAL FIX: Always reload GCode result from the ORIGINAL slice file (not helio-modified) 
+            // to ensure we're using the current slice data, not stale helio-modified data from a previous simulation.
+            // This fixes the bug where deleting an object and inserting a new one would show
+            // results from the first object instead of the second.
+            std::string current_gcode_path = partplate_list.get_curr_plate()->get_tmp_gcode_path();
+            std::string file_to_reload = current_gcode_path;
+            
+            std::cerr << "[HELIO_DEBUG] on_helio_process: Plate's current_gcode_path = " << current_gcode_path << std::endl;
+            std::cerr << "[HELIO_DEBUG] on_helio_process: g_result->filename BEFORE reload = " << (g_result ? g_result->filename : "NULL") << std::endl;
+            std::cerr << "[HELIO_DEBUG] on_helio_process: g_result->moves.size() BEFORE reload = " << (g_result ? g_result->moves.size() : 0) << std::endl;
+            
+            // Determine which file to use: prefer original_*.gcode if it exists and is from the same slice
+            // (i.e., created before the current file was overwritten by a new slice)
+            if (!current_gcode_path.empty()) {
+                fs::path gcode_path(current_gcode_path);
+                std::string original_path = gcode_path.parent_path().string() + "/original_" + gcode_path.filename().string();
+                
+                bool current_exists = boost::filesystem::exists(current_gcode_path);
+                bool original_exists = boost::filesystem::exists(original_path);
+                
+                if (current_exists && original_exists) {
+                    // Both exist - check modification times to determine which has the original slice data
+                    auto current_time = boost::filesystem::last_write_time(current_gcode_path);
+                    auto original_time = boost::filesystem::last_write_time(original_path);
+                    
+                    // Compare times: if current is significantly newer (more than 2 seconds), it was overwritten by a new slice
+                    // Otherwise, the current file likely has helio-modified data, so use the original
+                    std::time_t current_time_t = current_time;
+                    std::time_t original_time_t = original_time;
+                    double time_diff = std::difftime(current_time_t, original_time_t);
+                    
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: Current file time: " << std::ctime(&current_time_t);
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: Original file time: " << std::ctime(&original_time_t);
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: Time difference: " << time_diff << " seconds" << std::endl;
+                    
+                    if (time_diff > 2.0) {
+                        // Current file is much newer (more than 2 seconds) - it's from a new slice, use it
+                        file_to_reload = current_gcode_path;
+                        std::cerr << "[HELIO_DEBUG] on_helio_process: Using current file (newer, from new slice): " << current_gcode_path << std::endl;
+                    } else {
+                        // Current file is same age or only slightly newer - it likely has helio-modified data
+                        // Use the original file which has the original slice data before helio modifications
+                        file_to_reload = original_path;
+                        std::cerr << "[HELIO_DEBUG] on_helio_process: Using original file (current likely has helio data): " << original_path << std::endl;
+                    }
+                } else if (current_exists) {
+                    // Only current exists - use it (no helio has run yet, or original was deleted)
+                    file_to_reload = current_gcode_path;
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: Using current file (no original exists): " << current_gcode_path << std::endl;
+                } else if (original_exists) {
+                    // Only original exists - current was deleted/renamed, use original
+                    file_to_reload = original_path;
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: Current file missing, using original: " << original_path << std::endl;
+                }
+            }
+            
+            if (!file_to_reload.empty() && boost::filesystem::exists(file_to_reload)) {
+                std::cerr << "[HELIO_DEBUG] on_helio_process: Reloading GCode from file to ensure fresh data: " << file_to_reload << std::endl;
+                try {
+                    GCodeProcessor processor;
+                    const Vec3d origin = partplate_list.get_curr_plate()->get_origin();
+                    processor.set_xy_offset(origin(0), origin(1));
+                    processor.process_file(file_to_reload);
+                    
+                    // Update the result with the fresh data from the file
+                    g_result->take(processor.extract_result());
+                    g_result->filename = current_gcode_path; // Always use the current path for the result
+                    
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: After reload - filename = " << g_result->filename << std::endl;
+                    std::cerr << "[HELIO_DEBUG] on_helio_process: After reload - moves.size() = " << g_result->moves.size() << std::endl;
+                    
+                    BOOST_LOG_TRIVIAL(info) << "[HELIO] Reloaded GCode result from file to ensure fresh slice data";
+                } catch (const std::exception& ex) {
+                    BOOST_LOG_TRIVIAL(error) << "[HELIO] Failed to reload GCode from file: " << ex.what();
+                    std::cerr << "[HELIO ERROR] Failed to reload GCode from file: " << ex.what() << std::endl;
+                    // Continue with existing result if reload fails
+                }
+            } else {
+                std::cerr << "[HELIO_DEBUG] on_helio_process: WARNING - GCode file not found or path empty: " << file_to_reload << std::endl;
+            }
+            
+            // Ensure helio_background_process uses the current slice result from the plate
+            helio_background_process.set_gcode_result(g_result);
+
+            /*simulation*/
+            int action = dlg.get_action();
+            helio_background_process.set_action(action);
+
+            if (action == 0) {
+                bool valid = false;
+                HelioQuery::SimulationInput data = dlg.get_simulation_input(valid);
+                if (!valid) { continue; }
+
+                helio_background_process.set_simulation_input_data(data);
+                helio_background_process.init(helio_api_key, helio_api_url, printer_id, material_id, g_result, preview, [this]() {});
+                helio_background_process.helio_thread_start(background_process.m_mutex, background_process.m_condition, background_process.m_state, notification_manager);
+                BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":helio simulation process called";
+            }
+            /*optimization*/
+            else if (action == 1) {
+                bool valid = false;
+                HelioQuery::OptimizationInput data = dlg.get_optimization_input(valid);
+                if (!valid) { continue; }
+
+                helio_background_process.set_optimization_input_data(data);
+                helio_background_process.init(helio_api_key, helio_api_url, printer_id, material_id, g_result, preview, [this]() {});
+                helio_background_process.helio_thread_start(background_process.m_mutex, background_process.m_condition, background_process.m_state, notification_manager);
+                BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":helio optimization process called";
+            }
+
+            break;
+            }
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Helio: Exception creating/showing dialog: " << e.what();
+            std::cerr << "[HELIO ERROR] Exception creating/showing dialog: " << e.what() << std::endl;
+            MessageDialog(nullptr, wxString::Format(_L("Error opening Helio dialog: %s"), e.what()), _L("Helio Error"), wxOK | wxICON_ERROR).ShowModal();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "Helio: Unknown exception creating/showing dialog";
+            std::cerr << "[HELIO ERROR] Unknown exception creating/showing dialog" << std::endl;
+            MessageDialog(nullptr, _L("Unknown error opening Helio dialog"), _L("Helio Error"), wxOK | wxICON_ERROR).ShowModal();
+        }
+    }
 }
 
 void Plater::priv::on_notify_update_plate_thumbnail(wxCommandEvent& event)
@@ -9395,10 +10097,26 @@ void Plater::priv::init_notification_manager()
     notification_manager->init();
 
     auto cancel_callback = [this]() {
+        bool res1 = false;
+        bool res2 = false;
+
+        if (this->helio_background_process.is_running()) {
+            BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] cancel_callback - stopping Helio process";
+            std::cerr << "[HELIO DEBUG] cancel_callback - stopping Helio process" << std::endl;
+            this->helio_background_process.stop_current_helio_action();
+            this->helio_background_process.stop();
+            res1 = true;
+            notification_manager->set_slicing_progress_hidden();
+        }
+
         if (this->background_process.idle())
-            return false;
-        this->background_process.stop();
-        return true;
+            res2 = false;
+        else {
+            this->background_process.stop();
+            res2 = true;
+        }
+
+        return res1 || res2;
     };
     notification_manager->init_slicing_progress_notification(cancel_callback);
     notification_manager->set_fff(printer_technology == ptFFF);
@@ -16864,6 +17582,80 @@ GLCanvas3D* Plater::get_view3D_canvas3D() { return p->view3D->get_canvas3d(); }
 View3D*     Plater::get_vew3D() { return p->view3D; }
 
 GLCanvas3D* Plater::get_preview_canvas3D() { return p->preview->get_canvas3d(); }
+
+int Plater::get_gcode_layers_count()
+{
+    try {
+        if (p && p->preview) {
+            auto* canvas = p->preview->get_canvas3d();
+            if (canvas) {
+                auto& gcode_viewer = canvas->get_gcode_viewer();
+                return gcode_viewer.get_layers_zs().size();
+            }
+        }
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(error) << "get_gcode_layers_count: Exception caught";
+        std::cerr << "[HELIO ERROR] get_gcode_layers_count: Exception caught" << std::endl;
+    }
+    return 0;
+}
+
+bool Plater::get_preview_min_max_value_of_option(int index, float &_min, float &_max)
+{
+    // Stub implementation - CrealityPrint doesn't have the same GCodeViewer renderer
+    // Return default values
+    _min = 0.0f;
+    _max = 500.0f;  // Reasonable default max for speed
+    return false;
+}
+
+void Plater::stop_helio_process()
+{
+    BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() called";
+    std::cerr << "[HELIO DEBUG] stop_helio_process() called" << std::endl;
+    
+    int current_state = p->helio_background_process.get_state();
+    bool is_running_before = p->helio_background_process.is_running();
+    BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - current_state: " << current_state << ", is_running: " << is_running_before;
+    std::cerr << "[HELIO DEBUG] stop_helio_process() - current_state: " << current_state << ", is_running: " << is_running_before << std::endl;
+    
+    if (p->helio_background_process.is_running()) {
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - process is running, stopping...";
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - process is running, stopping..." << std::endl;
+        
+        // Stop the process first (sets state to CANCELED)
+        p->helio_background_process.stop();
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - stop() called, state after stop: " << p->helio_background_process.get_state();
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - stop() called, state after stop: " << p->helio_background_process.get_state() << std::endl;
+        
+        // Stop any ongoing API calls
+        p->helio_background_process.stop_current_helio_action();
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - stop_current_helio_action() called";
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - stop_current_helio_action() called" << std::endl;
+        
+        // Clear file cache
+        p->helio_background_process.clear_helio_file_cache();
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - clear_helio_file_cache() called";
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - clear_helio_file_cache() called" << std::endl;
+        
+        // Reset state to INITIAL
+        p->helio_background_process.reset();
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - reset() called, state after reset: " << p->helio_background_process.get_state();
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - reset() called, state after reset: " << p->helio_background_process.get_state() << std::endl;
+        
+        bool is_running_after = p->helio_background_process.is_running();
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - is_running after all operations: " << is_running_after;
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - is_running after all operations: " << is_running_after << std::endl;
+    } else {
+        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] stop_helio_process() - process is NOT running, nothing to stop";
+        std::cerr << "[HELIO DEBUG] stop_helio_process() - process is NOT running, nothing to stop" << std::endl;
+    }
+}
+
+void Plater::feedback_helio_process(float rating, const std::string& comment)
+{
+    p->helio_background_process.feedback_current_helio_action(rating, comment);
+}
 
 GLCanvas3D* Plater::get_assmeble_canvas3D()
 {

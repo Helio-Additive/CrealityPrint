@@ -133,6 +133,7 @@ struct Http::priv
 	static int xfercb(void *userp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow);
 	static int xfercb_legacy(void *userp, double dltotal, double dlnow, double ultotal, double ulnow);
 	static size_t form_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp);
+	static size_t put_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp);
     static size_t headers_cb(char *buffer, size_t size, size_t nitems, void *userp);
 
 	void set_timeout_connect(long timeout);
@@ -284,6 +285,23 @@ size_t Http::priv::form_file_read_cb(char *buffer, size_t size, size_t nitems, v
 	return f->ifs.gcount();
 }
 
+size_t Http::priv::put_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp)
+{
+	auto fstream = static_cast<fs::ifstream*>(userp);
+
+	try {
+		if (!fstream || !fstream->is_open()) {
+			return CURL_READFUNC_ABORT;
+		}
+
+		size_t max_read_size = size * nitems;
+		fstream->read(buffer, max_read_size);
+		return fstream->gcount();
+	} catch (const std::exception &) {
+		return CURL_READFUNC_ABORT;
+	}
+}
+
 size_t Http::priv::headers_cb(char *buffer, size_t size, size_t nitems, void *userp)
 {
 	auto self = static_cast<priv*>(userp);
@@ -383,8 +401,9 @@ void Http::priv::set_put_body(const fs::path &path)
 	if (!ec) {
 		putFile = std::make_unique<fs::ifstream>(path, std::ios_base::binary |std::ios_base::in);
 		::curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+		::curl_easy_setopt(curl, CURLOPT_READFUNCTION, put_file_read_cb);
 		::curl_easy_setopt(curl, CURLOPT_READDATA, (void *) (putFile.get()));
-		::curl_easy_setopt(curl, CURLOPT_INFILESIZE, filesize);
+		::curl_easy_setopt(curl, CURLOPT_INFILESIZE, static_cast<curl_off_t>(filesize));
 	}
 }
 
@@ -420,7 +439,10 @@ void Http::priv::http_perform()
 	::curl_easy_setopt(curl, CURLOPT_POSTREDIR, CURL_REDIR_POST_ALL);
 	::curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writecb);
 	::curl_easy_setopt(curl, CURLOPT_WRITEDATA, static_cast<void*>(this));
-	::curl_easy_setopt(curl, CURLOPT_READFUNCTION, form_file_read_cb);
+	// Only set form_file_read_cb if putFile is not set (PUT requests set their own read function)
+	if (!putFile) {
+		::curl_easy_setopt(curl, CURLOPT_READFUNCTION, form_file_read_cb);
+	}
 	//BBS set header functions
 	::curl_easy_setopt(curl, CURLOPT_HEADERDATA, static_cast<void *>(this));
 	::curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headers_cb);

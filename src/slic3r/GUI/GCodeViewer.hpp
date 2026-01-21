@@ -211,6 +211,10 @@ public:
         float volumetric_rate{ 0.0f };
         float layer_time{ 0.0f };
         float acceleration{ 0.0f };
+        // Helio thermal index (default to -200 to indicate null/no data - will show as grey)
+        float thermal_index_min{ -200.0f };
+        float thermal_index_max{ -200.0f };
+        float thermal_index_mean{ -200.0f };
         unsigned char extruder_id{ 0 };
         unsigned char cp_color_id{ 0 };
         std::vector<Sub_Path> sub_paths;
@@ -465,6 +469,10 @@ public:
         LayerTime,
         LayerTimeLog,
         Acceleration,
+        // Helio thermal index view types
+        ThermalIndexMin,
+        ThermalIndexMax,
+        ThermalIndexMean,
         Count
     };
 
@@ -526,15 +534,46 @@ public:
             float max;
             unsigned int count;
             bool log_scale;
+            // helio
+            bool is_fixed_range;
+            std::vector<ColorRGBA> range_colors;
+            // end helio
 
-            Range() { reset(); }
+            Range() : is_fixed_range(false) { 
+                // range_colors will be set in implementation
+                reset(); 
+            }
+            // Constructor for fixed range (used for thermal index)
+            Range(float min_a, float max_a, std::vector<ColorRGBA> range_colors_a)
+                : min(min_a), max(max_a), is_fixed_range(true), range_colors(range_colors_a)
+            {
+                reset();
+            }
+            
             void update_from(const float value) {
+                // For fixed ranges (thermal index), skip counting null values (values < min)
+                // Null thermal index values are marked as -200, which is below the min of -100
+                if (is_fixed_range && value < min) {
+                    return; // Don't count null values for fixed ranges
+                }
                 if (value != max && value != min)
                     ++count;
-                min = std::min(min, value);
-                max = std::max(max, value);
+                if (!is_fixed_range) {
+                    min = std::min(min, value);
+                    max = std::max(max, value);
+                }
             }
-            void reset(bool log = false) { min = FLT_MAX; max = -FLT_MAX; count = 0; log_scale = log; }
+            void reset(bool log = false) {
+                if (!is_fixed_range) {
+                    min = FLT_MAX;
+                    max = -FLT_MAX;
+                    count = 0;
+                    log_scale = log;
+                } else {
+                    count = 0;
+                    log_scale = log;
+                }
+            }
 
             float step_size() const;
             ColorRGBA get_color_at(float value) const;
@@ -562,6 +601,13 @@ public:
             
             // Color mapping by acceleration
             Range acceleration;
+            
+            // Helio thermal index ranges - fixed range from -100 to 100
+            // Note: Colors will be set in the implementation
+            Range thermal_index_min;
+            Range thermal_index_max;
+            Range thermal_index_mean;
+            
             void reset() {
                 height.reset();
                 width.reset();
@@ -572,6 +618,10 @@ public:
                 layer_duration.reset();
                 layer_duration_log.reset(true);
                 acceleration.reset();
+                // Thermal index ranges are fixed, just reset count
+                thermal_index_min.reset();
+                thermal_index_max.reset();
+                thermal_index_mean.reset();
             }
         };
 
@@ -762,6 +812,7 @@ public:
     // recalculate ranges in dependence of what is visible and sets tool/print colors
     void refresh(const GCodeProcessorResult& gcode_result, const std::vector<std::string>& str_tool_colors);
     void refresh_render_paths();
+    void update_thermal_index_view_types();
     void update_shells_color_by_extruder(const DynamicPrintConfig* config);
     void set_shell_transparency(float alpha = 0.15f);
 

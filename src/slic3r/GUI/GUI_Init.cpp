@@ -108,6 +108,28 @@ int GUI_Run(GUI_InitParams &params)
                     newPath.append(processNameStr).replace_extension(".dmp");
                     BOOST_LOG_TRIVIAL(warning) << "macOS Breakpad: newPath=" << newPath.string();
                     if (boost::filesystem::exists(oldPath)) {
+                        // Crash loop detection: count crash dumps in the directory
+                        // If there are many dumps, we're likely in a crash loop
+                        int crash_count = 0;
+                        try {
+                            boost::filesystem::path dump_dir_path(dump_dir);
+                            for (boost::filesystem::directory_iterator it(dump_dir_path); it != boost::filesystem::directory_iterator(); ++it) {
+                                if (boost::filesystem::is_regular_file(it->path()) && 
+                                    it->path().extension() == ".dmp") {
+                                    crash_count++;
+                                }
+                            }
+                            BOOST_LOG_TRIVIAL(warning) << "macOS Breakpad: found " << crash_count << " crash dumps in directory";
+                            
+                            // If we have more than 3 crash dumps, we're likely in a loop
+                            if (crash_count > 3) {
+                                BOOST_LOG_TRIVIAL(error) << "macOS Breakpad: CRASH LOOP DETECTED! Found " << crash_count << " crash dumps. NOT restarting to prevent infinite loop.";
+                                boost::log::core::get()->flush();
+                                return true; // Don't restart
+                            }
+                        } catch (const std::exception& e) {
+                            BOOST_LOG_TRIVIAL(error) << "macOS Breakpad: failed to check for crash dumps: " << e.what();
+                        }
                         // MessageBox(NULL, newPath.wstring().c_str(), minidump_id, MB_OK | MB_ICONINFORMATION);
                         try {
                             boost::filesystem::rename(oldPath, newPath);

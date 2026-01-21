@@ -439,6 +439,10 @@ void AppConfig::set_defaults()
 
         if (get("default_page").empty())
             set("default_page", "1");
+
+        // Helio Additive plugin settings
+        if (get("helio_enable").empty())
+            set_bool("helio_enable", true);  // Helio installed by default
     }
     else {
 #ifdef _WIN32

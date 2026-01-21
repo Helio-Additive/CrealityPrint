@@ -20,6 +20,7 @@ public:
     void Rescale(bool isResize);
     void OnIconize(wxAuiToolBarEvent& event);
     void OnUpload3mf(wxAuiToolBarEvent& event);
+    void OnHelioButton(wxAuiToolBarEvent& event);
     void OnFullScreen(wxAuiToolBarEvent& event);
     void OnCloseFrame(wxAuiToolBarEvent& event);
     void OnFileToolItem(wxAuiToolBarEvent& evt);
@@ -73,6 +74,9 @@ public:
     void SaveNormalRect();
 
     void EnableUpload3mf();
+    void EnableHelioButton(bool enable);
+    void UpdateHelioActivationButtons();
+    void ShowHelioButton(bool show);  // Truly show/hide the Helio tool
 
     void ShowCalibrationButton(bool show = true);
     void SetSelection(size_t index);
@@ -109,6 +113,8 @@ private:
     wxAuiToolBarItem* maximize_btn;
     wxAuiToolBarItem* m_save_project_item;
     wxAuiToolBarItem* m_upload_btn;
+    wxAuiToolBarItem* m_helio_btn;
+    bool m_helio_btn_shown { true };  // Track if Helio button is currently shown
     wxControl* m_tabCtrol;
 
     wxBitmap m_publish_bitmap;

@@ -2020,6 +2020,10 @@ void GCodeProcessor::reset()
     m_g1_line_id = 0;
     m_layer_id = 0;
     m_cp_color.reset();
+    
+    // Helio thermal index
+    m_thermal_index = ThermalIndex(0.0f, 0.0f, 0.0f);
+    m_is_helio_gcode = false;
 
     m_producer = EProducer::Unknown;
 
@@ -2793,10 +2797,14 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
     }
     else {
         const std::string &comment = line.raw();
-        if (comment.length() > 2 && comment.front() == ';')
+        if (comment.length() > 2 && comment.front() == ';') {
             // Process tags embedded into comments. Tag comments always start at the start of a line
             // with a comment and continue with a tag without any whitespace separator.
             process_tags(comment.substr(1), producers_enabled);
+            
+            // Process helioadditive thermal index comments
+            process_helioadditive_comment(line);
+        }
     }
 }
 
@@ -2932,6 +2940,20 @@ bool GCodeProcessor::get_last_z_from_gcode(const std::string& gcode_str, double&
         end_index = start_index;
     }
     return is_z_changed;
+}
+
+void GCodeProcessor::process_helioadditive_comment(const GCodeReader::GCodeLine& line)
+{
+    const std::string& comment = line.raw();
+    
+    bool is_helio = false;
+    ThermalIndex thermal_index = parse_helioadditive_comment(comment, is_helio);
+    
+    if (is_helio) {
+        m_is_helio_gcode = true;
+        m_thermal_index = thermal_index;
+        // Removed verbose debug logging - was spamming logs with every thermal index found
+    }
 }
 
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
@@ -4080,6 +4102,9 @@ void GCodeProcessor::flush_time(std::vector<TimeBlock>& queue, bool lazy)
 
 void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
 {
+    // Process helio thermal index comment embedded in G1 line
+    process_helioadditive_comment(line);
+    
     float filament_diameter = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ? m_result.filament_diameters[m_extruder_id] : m_result.filament_diameters.back();
     float filament_flowratio = (static_cast<size_t>(m_extruder_id) < m_result.filament_flow_ratios.size()) ? m_result.filament_flow_ratios[m_extruder_id] : m_result.filament_flow_ratios.back();
     float filament_radius = 0.5f * filament_diameter;
@@ -4510,6 +4535,9 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
 
 void GCodeProcessor::process_G1_klipper_new(const GCodeReader::GCodeLine& line)
 {
+    // Process helio thermal index comment embedded in G1 line
+    process_helioadditive_comment(line);
+    
     float filament_diameter           = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ?
                                             m_result.filament_diameters[m_extruder_id] :
                                             m_result.filament_diameters.back();
@@ -4850,6 +4878,9 @@ void GCodeProcessor::process_G1_klipper_new(const GCodeReader::GCodeLine& line)
 
 void GCodeProcessor::process_G1_klipper(const GCodeReader::GCodeLine& line)
 {
+    // Process helio thermal index comment embedded in G1 line
+    process_helioadditive_comment(line);
+    
     float filament_diameter = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ? m_result.filament_diameters[m_extruder_id] : m_result.filament_diameters.back();
     float filament_flowratio = (static_cast<size_t>(m_extruder_id) < m_result.filament_flow_ratios.size()) ? m_result.filament_flow_ratios[m_extruder_id] : m_result.filament_flow_ratios.back();
     float filament_radius = 0.5f * filament_diameter;
@@ -5234,6 +5265,9 @@ float normalize_angle(float angle)
 // BBS: this function is absolutely new for G2 and G3 gcode
 void  GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line)
 {
+    // Process helio thermal index comment embedded in G2/G3 line
+    process_helioadditive_comment(line);
+    
     float filament_diameter = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ? m_result.filament_diameters[m_extruder_id] : m_result.filament_diameters.back();
     float filament_flowratio = (static_cast<size_t>(m_extruder_id) < m_result.filament_flow_ratios.size()) ? m_result.filament_flow_ratios[m_extruder_id] : m_result.filament_flow_ratios.back();
     float filament_radius = 0.5f * filament_diameter;
@@ -5709,6 +5743,9 @@ void generate_arc_segments(const Vec3f&        start_pos,
 
 void GCodeProcessor::process_G2_G3_klipper_new(const GCodeReader::GCodeLine& line)
 {
+    // Process helio thermal index comment embedded in G2/G3 line
+    process_helioadditive_comment(line);
+    
     float filament_diameter           = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ?
                                             m_result.filament_diameters[m_extruder_id] :
                                             m_result.filament_diameters.back();
@@ -6143,6 +6180,9 @@ void GCodeProcessor::process_G2_G3_klipper_new(const GCodeReader::GCodeLine& lin
 
 void GCodeProcessor::process_G2_G3_klipper(const GCodeReader::GCodeLine& line)
 {
+    // Process helio thermal index comment embedded in G2/G3 line
+    process_helioadditive_comment(line);
+    
     float filament_diameter           = (static_cast<size_t>(m_extruder_id) < m_result.filament_diameters.size()) ?
                                             m_result.filament_diameters[m_extruder_id] :
                                             m_result.filament_diameters.back();
@@ -8104,6 +8144,10 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type)
         static_cast<float>(m_result.moves.size()),
         static_cast<float>(m_layer_id), //layer_duration: set later
         accel,
+        // Helio thermal index values
+        m_thermal_index.isNull ? 0.0f : m_thermal_index.min,
+        m_thermal_index.isNull ? 0.0f : m_thermal_index.max,
+        m_thermal_index.isNull ? 0.0f : m_thermal_index.mean,
         //BBS: add arc move related data
         path_type,
         Vec3f(m_arc_center(0, 0) + m_x_offset, m_arc_center(1, 0) + m_y_offset, m_arc_center(2, 0)) + m_extruder_offsets[m_extruder_id],

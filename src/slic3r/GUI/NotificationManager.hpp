@@ -77,6 +77,8 @@ enum class NotificationType
 	// Slicing error produced by BackgroundSlicingProcess::validate() or by the BackgroundSlicingProcess background
 	// thread thowing a SlicingError exception.
 	SlicingError,
+	// Helio slicing error
+	HelioSlicingError,
 	//Gcode conflict generates slicing severe warning
     SlicingSeriousWarning,
 	// Slicing warnings, issued by the slicing process.

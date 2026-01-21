@@ -119,13 +119,15 @@ struct OptionConfig::priv
     std::string get_group_icon(std::string group_name)
     {
         if (m_jsonData.contains("config_options_group")) {
-            for (const auto& page : m_jsonData["config_options_group"]) {
-                if (page.contains("option_group")) {
-                    for (const auto& group : page["option_group"]) {
-                        if (group.contains("name") && group.contains("icon")) {
-                            if (group["name"] == group_name)
-                            {
-                                return group["icon"];
+            const auto& config_group = m_jsonData["config_options_group"];
+            if (config_group.contains("data") && config_group["data"].is_array()) {
+                for (const auto& page : config_group["data"]) {
+                    if (page.contains("option_group") && page["option_group"].is_array()) {
+                        for (const auto& group : page["option_group"]) {
+                            if (group.contains("name") && group.contains("icon")) {
+                                if (group["name"] == group_name) {
+                                    return group["icon"];
+                                }
                             }
                         }
                     }

@@ -48,6 +48,7 @@ class SLAPrint;
 //BBS: add partplatelist and SlicingStatusEvent
 class PartPlateList;
 class SlicingStatusEvent;
+class HelioCompletionEvent;
 enum SLAPrintObjectStep : unsigned int;
 enum class ConversionType : int;
 class Ams;
@@ -114,6 +115,12 @@ wxDECLARE_EVENT(EVT_ON_MAPPING_DEVICE_FILAMENT, wxCommandEvent);
 wxDECLARE_EVENT(EVT_ON_SHOW_BOX_COLOR_SELECTION, wxCommandEvent);
 wxDECLARE_EVENT(EVT_EXPORT_GCODE_FINISHED, wxCommandEvent);
 wxDECLARE_EVENT(EVT_SUPPORT_TYPE_CHANGED, wxCommandEvent);
+
+// Helio events
+wxDECLARE_EVENT(EVT_HELIO_PROCESSING_COMPLETED, Slic3r::HelioCompletionEvent);
+wxDECLARE_EVENT(EVT_HELIO_PROCESSING_STARTED, SimpleEvent);
+wxDECLARE_EVENT(EVT_HELIO_INPUT_DLG, SimpleEvent);
+
 const wxString DEFAULT_PROJECT_NAME = "Untitled";
 
 class Sidebar : public wxPanel
@@ -608,6 +615,12 @@ public:
     GLCanvas3D* get_assmeble_canvas3D();
     wxWindow* get_select_machine_dialog();
     View3D*  get_vew3D();
+
+    // Helio helper methods
+    int get_gcode_layers_count();
+    bool get_preview_min_max_value_of_option(int index, float &_min, float &_max);
+    void stop_helio_process();
+    void feedback_helio_process(float rating, const std::string& comment);
 
     void arrange();
     void orient();

@@ -30,6 +30,7 @@
 #include "slic3r/GUI/print_manage/utils/cxmdns.h"
 #include "slic3r/GUI/print_manage/Utils.hpp"
 #include "Widgets/HoverBorderIcon.hpp"
+#include "../Utils/HelioDragon.hpp"
 // Localization headers: include libslic3r version first so everything in this file
 // uses the slic3r/GUI version (the macros will take precedence over the functions).
 // Also, there is a check that the former is not included from slic3r module.
@@ -46,6 +47,7 @@
 #include <regex>
 #include <thread>
 #include <string_view>
+#include <iostream>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
@@ -1316,12 +1318,14 @@ void GUI_App::post_init()
         if (app_config->get("default_page") == "1")
         {
             mainframe->select_tab(size_t(1));
-            mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
+            if (mainframe->m_topbar)
+                mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
         }
         else if (is_editor())
         {
             mainframe->select_tab(size_t(0));
-            mainframe->m_topbar->SetSelection(size_t(MainFrame::tpHome));
+            if (mainframe->m_topbar)
+                mainframe->m_topbar->SetSelection(size_t(MainFrame::tpHome));
          }
         mainframe->Thaw();
         plater_->trigger_restore_project(1);
@@ -1495,6 +1499,13 @@ void GUI_App::post_init()
            }
         }
     }
+    /*request helio config*/
+    if (app_config->get("helio_enable") == "true") {
+        if (!Slic3r::HelioQuery::get_helio_api_url().empty() && !Slic3r::HelioQuery::get_helio_pat().empty()) {
+            wxGetApp().request_helio_supported_data();
+        }
+    }
+
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
     
 //BBS: remove the single instance currently
@@ -3071,6 +3082,7 @@ bool GUI_App::OnInit()
             }
         }
         bool res = on_init_inner(isDumpLauncher);
+        std::cerr << "[TRACE] GUI_App::OnInit result=" << (res ? "true" : "false") << std::endl;
         if (!this->init_params->input_files.empty())
         {
             const auto url = this->init_params->input_files.front();
@@ -3211,6 +3223,7 @@ class wxBoostLog : public wxLog
 
 bool GUI_App::on_init_inner(bool isdump_launcher)
 {
+    std::cerr << "[TRACE] on_init_inner start" << std::endl;
     wxLog::SetActiveTarget(new wxBoostLog());
 #if BBL_RELEASE_TO_PUBLIC
     wxLog::SetLogLevel(wxLOG_Message);
@@ -3616,7 +3629,6 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     Slic3r::I18N::set_translate_callback(libslic3r_translate_callback);
 
     BOOST_LOG_TRIVIAL(info) << "create the main window";
-  
     mainframe = new MainFrame();
     //UITour::Instance();
     // hide settings tabs after first Layout
@@ -3643,8 +3655,9 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
             // ensure the selected technology is ptFFF
             plater_->set_printer_technology(ptFFF);
     }
-    else
+    else {
         load_current_presets();
+    }
 
     if (plater_ != nullptr) {
         plater_->reset_project_dirty_initial_presets();
@@ -3772,6 +3785,7 @@ bool GUI_App::on_init_inner(bool isdump_launcher)
     //  启动同步预设线程
     SyncUserPresets::getInstance().startup();
 #endif
+    std::cerr << "[TRACE] on_init_inner returning true" << std::endl;
     return true;
 }
 void  GUI_App::on_init_custom_config()
@@ -6574,11 +6588,13 @@ std::string GUI_App::handle_web_request(std::string cmd)
                            wxGetApp().mainframe->topbar()->DisableGuideModeItems();
                         #endif
                         #ifdef __APPLE__
-                           wxGetApp().mainframe->topbar()->DisableGuideModeItemsMac();
+                           if (wxGetApp().mainframe->topbar())
+                               wxGetApp().mainframe->topbar()->DisableGuideModeItemsMac();
                            Slic3r::macos_set_menu_bar_hidden(true);
                         #endif
                            wxGetApp().mainframe->select_tab(size_t(0));
-                           wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tpHome));
+                           if (wxGetApp().mainframe->m_topbar)
+                               wxGetApp().mainframe->m_topbar->SetSelection(size_t(MainFrame::tpHome));
                         #ifdef WIN32
                             ShowWindow(wxGetApp().mainframe->GetHWND(), SW_SHOWMAXIMIZED);
                         #else
@@ -6599,7 +6615,8 @@ std::string GUI_App::handle_web_request(std::string cmd)
                            mainframe->topbar()->EnableGuideModeItems();
                            #endif
                            #ifdef __APPLE__
-                           mainframe->topbar()->EnableGuideModeItemsMac();
+                           if (mainframe->topbar())
+                               mainframe->topbar()->EnableGuideModeItemsMac();
                            Slic3r::macos_set_menu_bar_hidden(false);
                            #endif
                            //mainframe->select_tab(size_t(1));
@@ -6899,7 +6916,8 @@ std::string GUI_App::handle_web_request(std::string cmd)
 
                 app_config->set("is_first_install", "1");
                 mainframe->select_tab(size_t(1));
-                mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
+                if (mainframe->m_topbar)
+                    mainframe->m_topbar->SetSelection(size_t(MainFrame::tp3DEditor));
                 send_result(1);
                 CallAfter([this] {
                     std::shared_ptr<wxTimer> tour_timer = std::make_shared<wxTimer>();
@@ -9873,6 +9891,7 @@ wxString GUI_App::filter_string(wxString str)
 
 bool GUI_App::OnExceptionInMainLoop()
 {
+    std::cerr << "[TRACE] GUI_App::OnExceptionInMainLoop" << std::endl;
     generic_exception_handle();
     return false;
 }
@@ -11108,6 +11127,51 @@ void GUI_App::on_interinstance_message(const std::string& msg)
             apply(plater->get_assmeble_canvas3D());
             apply(plater->get_current_canvas3D(false));
         }
+    }
+}
+
+bool GUI_App::is_helio_enable()
+{
+    if(!plater_) return false;
+    auto cfg = plater_->get_partplate_list().get_curr_plate()->config();
+    PrintSequence print_sequence = PrintSequence::ByLayer;
+    if (cfg->has("print_sequence")) {
+        print_sequence = cfg->option<ConfigOptionEnum<PrintSequence>>("print_sequence")->value;
+    }
+    else {
+        print_sequence = wxGetApp().global_print_sequence();
+    }
+
+    if (print_sequence == PrintSequence::ByObject) {
+        return false;
+    }
+
+    return true;
+}
+
+void GUI_App::request_helio_pat(std::function<void(std::string)> func)
+{
+    Slic3r::HelioQuery::request_pat_token(func);
+}
+
+void GUI_App::request_helio_supported_data()
+{
+    std::string helio_api_url = Slic3r::HelioQuery::get_helio_api_url();
+    std::string helio_api_key = Slic3r::HelioQuery::get_helio_pat();
+
+    BOOST_LOG_TRIVIAL(warning) << "Helio request_helio_supported_data called - URL: " << helio_api_url << ", Key empty: " << (helio_api_key.empty() ? "yes" : "no");
+    std::cerr << "[HELIO DEBUG] request_helio_supported_data called - URL: " << helio_api_url << ", Key empty: " << (helio_api_key.empty() ? "yes" : "no") << std::endl;
+    BOOST_LOG_TRIVIAL(warning) << "Helio current printers: " << HelioQuery::global_supported_printers.size() << ", materials: " << HelioQuery::global_supported_materials.size();
+    std::cerr << "[HELIO DEBUG] Current printers: " << HelioQuery::global_supported_printers.size() << ", materials: " << HelioQuery::global_supported_materials.size() << std::endl;
+
+    if (HelioQuery::global_supported_printers.size() <= 0 || HelioQuery::global_supported_materials.size() <= 0) {
+        BOOST_LOG_TRIVIAL(warning) << "Helio: Starting to request support data...";
+        std::cerr << "[HELIO DEBUG] Starting to request support data..." << std::endl;
+        Slic3r::HelioQuery::request_all_support_machine(helio_api_url, helio_api_key);
+        Slic3r::HelioQuery::request_all_support_materials(helio_api_url, helio_api_key);
+    } else {
+        BOOST_LOG_TRIVIAL(warning) << "Helio: Support data already loaded, skipping request";
+        std::cerr << "[HELIO DEBUG] Support data already loaded, skipping request" << std::endl;
     }
 }
 

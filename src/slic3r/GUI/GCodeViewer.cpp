@@ -101,6 +101,20 @@ namespace GUI {
         decode_color_to_float_array("#942616")    // reddish
     } };
 
+    static std::vector<ColorRGBA> Thermal_Index_Range_Colors{ {
+        decode_color_to_float_array("#0b2c7a"), // bluish
+        decode_color_to_float_array("#005478"),
+        decode_color_to_float_array("#006f86"),
+        decode_color_to_float_array("#008e8f"),
+        decode_color_to_float_array("#00b27c"),
+        decode_color_to_float_array("#04d70f"),
+        decode_color_to_float_array("#75b400"),
+        decode_color_to_float_array("#949100"),
+        decode_color_to_float_array("#a16c00"),
+        decode_color_to_float_array("#a04800"),
+        decode_color_to_float_array("#922616") // reddish
+    } };
+
     static ColorRGBA Wipe_Color = ColorRGBA::YELLOW();
     static ColorRGBA Neutral_Color = ColorRGBA::DARK_GRAY();
 
@@ -130,6 +144,12 @@ static std::string get_view_type_string(GCodeViewer::EViewType view_type)
         return _u8L("Layer Time (log)");
     else if (view_type == GCodeViewer::EViewType::Acceleration)
         return _u8L("Acceleration");
+    else if (view_type == GCodeViewer::EViewType::ThermalIndexMin)
+        return _u8L("Thermal Index (min)");
+    else if (view_type == GCodeViewer::EViewType::ThermalIndexMax)
+        return _u8L("Thermal Index (max)");
+    else if (view_type == GCodeViewer::EViewType::ThermalIndexMean)
+        return _u8L("Thermal Index (mean)");
     return "";
 }
 
@@ -245,7 +265,8 @@ bool GCodeViewer::Path::matches(const GCodeProcessorResult::MoveVertex& move) co
             move.position.z() <= sub_paths.front().first.position.z() && feedrate == move.feedrate && fan_speed == move.fan_speed &&
             height == round_to_bin(move.height) && width == round_to_bin(move.width) &&
             matches_percent(volumetric_rate, move.volumetric_rate(), 0.05f) && layer_time == move.layer_duration
-            && acceleration == move.acceleration;
+            && acceleration == move.acceleration
+            && thermal_index_min == move.thermal_index_min && thermal_index_max == move.thermal_index_max && thermal_index_mean == move.thermal_index_mean;
     }
     case EMoveType::Travel: {
         return type == move.type && feedrate == move.feedrate && extruder_id == move.extruder_id && cp_color_id == move.cp_color_id;
@@ -279,7 +300,9 @@ void GCodeViewer::TBuffer::add_path(const GCodeProcessorResult::MoveVertex& move
     paths.push_back({ move.type, move.extrusion_role, move.delta_extruder,
         round_to_bin(move.height), round_to_bin(move.width),
         move.feedrate, move.fan_speed, move.temperature,
-        move.volumetric_rate(), move.layer_duration, move.acceleration, move.extruder_id, move.cp_color_id, { { endpoint, endpoint } } });
+        move.volumetric_rate(), move.layer_duration, move.acceleration,
+        move.thermal_index_min, move.thermal_index_max, move.thermal_index_mean,
+        move.extruder_id, move.cp_color_id, { { endpoint, endpoint } } });
 }
 
 unsigned int GCodeViewer::TBuffer::max_vertices_per_segment() const
@@ -358,27 +381,43 @@ ColorRGBA GCodeViewer::Extrusions::Range::get_color_at(float value) const
         value = std::log(value);
         _min = std::log(min);
     }
+    
+    // Check for null values (values < min - 0.01f, used for thermal index null values at -200)
+    if (value < _min - 0.01f) {
+        return ColorRGBA::GRAY(); // for helio null values
+    }
+    
+    // Use default Range_Colors if range_colors is empty (for non-fixed ranges)
+    const std::vector<ColorRGBA>& colors = range_colors.empty() ? Range_Colors : range_colors;
+    
+    if (value > max) {
+        return colors[colors.size() - 1];
+    }
+    
     const float global_t = (step != 0.0f) ? std::max(0.0f, value - _min) / step : 0.0f; // lower limit of 0.0f
 
-    const size_t color_max_idx = Range_Colors.size() - 1;
+    const size_t color_max_idx = colors.size() - 1;
 
     // Compute the two colors just below (low) and above (high) the input value
     const size_t color_low_idx = std::clamp<size_t>(static_cast<size_t>(global_t), 0, color_max_idx);
     const size_t color_high_idx = std::clamp<size_t>(color_low_idx + 1, 0, color_max_idx);
 
     // Interpolate between the low and high colors to find exactly which color the input value should get
-    return lerp(Range_Colors[color_low_idx], Range_Colors[color_high_idx], global_t - static_cast<float>(color_low_idx));
+    return lerp(colors[color_low_idx], colors[color_high_idx], global_t - static_cast<float>(color_low_idx));
 }
 
 float GCodeViewer::Extrusions::Range::step_size() const {
-if (log_scale)
+    // Use default Range_Colors if range_colors is empty (for non-fixed ranges)
+    const std::vector<ColorRGBA>& colors = range_colors.empty() ? Range_Colors : range_colors;
+    
+    if (log_scale)
     {
         float min_range = min;
         if (min_range == 0)
             min_range = 0.001f;
-        return (std::log(max / min_range) / (static_cast<float>(Range_Colors.size()) - 1.0f));
+        return (std::log(max / min_range) / (static_cast<float>(colors.size()) - 1.0f));
     } else
-    return (max - min) / (static_cast<float>(Range_Colors.size()) - 1.0f);
+    return (max - min) / (static_cast<float>(colors.size()) - 1.0f);
 }
 
 float GCodeViewer::Extrusions::Range::get_value_at_step(int step) const {
@@ -532,9 +571,14 @@ void GCodeViewer::Marker::render(int canvas_width, int canvas_height, const EVie
         ImGui::PushItemWidth(item_size);
         imgui.text(buf);
 
-        sprintf(buf, "%s%.0f", speed.c_str(), m_curr_move.feedrate);
-        ImGui::PushItemWidth(item_size);
-        imgui.text(buf);
+        // Thermal index view types don't show speed, they show thermal index values
+        if (view_type != EViewType::ThermalIndexMin && 
+            view_type != EViewType::ThermalIndexMax && 
+            view_type != EViewType::ThermalIndexMean) {
+            sprintf(buf, "%s%.0f", speed.c_str(), m_curr_move.feedrate);
+            ImGui::PushItemWidth(item_size);
+            imgui.text(buf);
+        }
 
         switch (view_type) {
         case EViewType::Height: {
@@ -590,6 +634,38 @@ void GCodeViewer::Marker::render(int canvas_width, int canvas_height, const EVie
         case EViewType::Acceleration: {
             ImGui::SameLine(startx2);
             sprintf(buf, "%s%.0f", acceleration.c_str(), m_curr_move.acceleration);
+            ImGui::PushItemWidth(item_size);
+            imgui.text(buf);
+            break;
+        }
+        // Helio thermal index
+        case EViewType::ThermalIndexMin:
+        case EViewType::ThermalIndexMax:
+        case EViewType::ThermalIndexMean: {
+            std::string min = ImGui::ColorMarkerStart + _u8L("Min: ") + ImGui::ColorMarkerEnd;
+            std::string max = ImGui::ColorMarkerStart + _u8L("Max: ") + ImGui::ColorMarkerEnd;
+            std::string mean = ImGui::ColorMarkerStart + _u8L("Mean: ") + ImGui::ColorMarkerEnd;
+            
+            if (m_curr_move.thermal_index_min < -100)
+                sprintf(buf, "%snull", min.c_str());
+            else
+                sprintf(buf, "%s%.1f", min.c_str(), m_curr_move.thermal_index_min);
+            ImGui::PushItemWidth(item_size);
+            imgui.text(buf);
+
+            ImGui::SameLine(startx2);
+            if (m_curr_move.thermal_index_max < -100)
+                sprintf(buf, "%snull", max.c_str());
+            else
+                sprintf(buf, "%s%.1f", max.c_str(), m_curr_move.thermal_index_max);
+            ImGui::PushItemWidth(item_size);
+            imgui.text(buf);
+
+            ImGui::SameLine(startx3);
+            if (m_curr_move.thermal_index_mean < -100)
+                sprintf(buf, "%snull", mean.c_str());
+            else
+                sprintf(buf, "%s%.1f", mean.c_str(), m_curr_move.thermal_index_mean);
             ImGui::PushItemWidth(item_size);
             imgui.text(buf);
             break;
@@ -1321,6 +1397,11 @@ void GCodeViewer::refresh(const GCodeProcessorResult& gcode_result, const std::v
 
     // update ranges for coloring / legend
     m_extrusions.reset_ranges();
+    // Initialize thermal index ranges with fixed -100 to 100 range and colors
+    m_extrusions.ranges.thermal_index_min = Extrusions::Range(-100.0f, 100.0f, Thermal_Index_Range_Colors);
+    m_extrusions.ranges.thermal_index_max = Extrusions::Range(-100.0f, 100.0f, Thermal_Index_Range_Colors);
+    m_extrusions.ranges.thermal_index_mean = Extrusions::Range(-100.0f, 100.0f, Thermal_Index_Range_Colors);
+    
     for (size_t i = 0; i < m_moves_count; ++i) {
         // skip first vertex
         if (i == 0)
@@ -1344,6 +1425,12 @@ void GCodeViewer::refresh(const GCodeProcessorResult& gcode_result, const std::v
 m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
             }
             m_extrusions.ranges.acceleration.update_from(curr.acceleration);
+            
+            // Helio thermal index ranges - always update to capture valid thermal data
+            // Check if at least one value is non-zero (or any value exists from helio gcode)
+            m_extrusions.ranges.thermal_index_min.update_from(curr.thermal_index_min);
+            m_extrusions.ranges.thermal_index_max.update_from(curr.thermal_index_max);
+            m_extrusions.ranges.thermal_index_mean.update_from(curr.thermal_index_mean);
             [[fallthrough]];
         }
         case EMoveType::Travel:
@@ -1364,6 +1451,9 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
     //BBS: add mutex for protection of gcode result
     gcode_result.unlock();
 
+    // Add thermal index view types if thermal data is present
+    update_thermal_index_view_types();
+
     // update buffers' render paths
     refresh_render_paths();
     log_memory_used("Refreshed G-code extrusion paths, ");
@@ -1372,6 +1462,68 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
 void GCodeViewer::refresh_render_paths()
 {
     refresh_render_paths(false, false);
+}
+
+void GCodeViewer::update_thermal_index_view_types()
+{
+    // Check if thermal index data is present in the ranges
+    // Valid thermal data exists if count > 0, meaning we found at least one valid thermal value
+    // Note: update_from() skips null values (-200) for fixed ranges, so count > 0 means real data exists
+    bool has_thermal_data = m_extrusions.ranges.thermal_index_mean.count > 0 ||
+                           m_extrusions.ranges.thermal_index_min.count > 0 ||
+                           m_extrusions.ranges.thermal_index_max.count > 0;
+    
+    BOOST_LOG_TRIVIAL(info) << "[HELIO DEBUG] update_thermal_index_view_types - has_thermal_data: " << has_thermal_data 
+                            << ", mean.count: " << m_extrusions.ranges.thermal_index_mean.count
+                            << ", min.count: " << m_extrusions.ranges.thermal_index_min.count
+                            << ", max.count: " << m_extrusions.ranges.thermal_index_max.count;
+    
+    // Remove existing thermal index view types
+    auto remove_thermal_types = [this](EViewType type) {
+        auto it = std::find(view_type_items.begin(), view_type_items.end(), type);
+        if (it != view_type_items.end()) {
+            size_t idx = std::distance(view_type_items.begin(), it);
+            view_type_items.erase(it);
+            if (idx < view_type_items_str.size()) {
+                view_type_items_str.erase(view_type_items_str.begin() + idx);
+            }
+        }
+    };
+    
+    remove_thermal_types(EViewType::ThermalIndexMin);
+    remove_thermal_types(EViewType::ThermalIndexMax);
+    remove_thermal_types(EViewType::ThermalIndexMean);
+    
+    if (has_thermal_data) {
+        BOOST_LOG_TRIVIAL(info) << "[HELIO DEBUG] Thermal index data detected, adding view types";
+        
+        // Find position before FilamentId (which is hidden from UI)
+        auto filament_it = std::find(view_type_items.begin(), view_type_items.end(), EViewType::FilamentId);
+        size_t insert_pos = (filament_it != view_type_items.end()) ? 
+                           std::distance(view_type_items.begin(), filament_it) : view_type_items.size();
+        
+        // Insert thermal index view types
+        view_type_items.insert(view_type_items.begin() + insert_pos, EViewType::ThermalIndexMean);
+        view_type_items.insert(view_type_items.begin() + insert_pos, EViewType::ThermalIndexMax);
+        view_type_items.insert(view_type_items.begin() + insert_pos, EViewType::ThermalIndexMin);
+        
+        // Update string list (excluding FilamentId)
+        view_type_items_str.clear();
+        for (size_t i = 0; i < view_type_items.size(); i++) {
+            if (view_type_items[i] != EViewType::FilamentId) {
+                view_type_items_str.push_back(get_view_type_string(view_type_items[i]));
+            }
+        }
+        
+        // Set default view to ThermalIndexMean when thermal data is present
+        for (int i = 0; i < view_type_items.size(); i++) {
+            if (view_type_items[i] == EViewType::ThermalIndexMean) {
+                m_view_type_sel = i;
+                set_view_type(EViewType::ThermalIndexMean);
+                break;
+            }
+        }
+    }
 }
 
 void GCodeViewer::update_shells_color_by_extruder(const DynamicPrintConfig *config)
@@ -1416,6 +1568,10 @@ void GCodeViewer::reset()
     m_filament_diameters = std::vector<float>();
     m_filament_densities = std::vector<float>();
     m_extrusions.reset_ranges();
+    // Initialize thermal index ranges with fixed -100 to 100 range and colors
+    m_extrusions.ranges.thermal_index_min = Extrusions::Range(-100.0f, 100.0f, Thermal_Index_Range_Colors);
+    m_extrusions.ranges.thermal_index_max = Extrusions::Range(-100.0f, 100.0f, Thermal_Index_Range_Colors);
+    m_extrusions.ranges.thermal_index_mean = Extrusions::Range(-100.0f, 100.0f, Thermal_Index_Range_Colors);
     //BBS: always load shell at preview
     //m_shells.volumes.clear();
     m_layers.reset();
@@ -3602,6 +3758,10 @@ void GCodeViewer::refresh_render_paths(bool keep_sequential_current_first, bool 
             color      = {id, role, id, 1.0f};
             break;
         }
+        // Helio thermal index view types
+        case EViewType::ThermalIndexMin:  { color = m_extrusions.ranges.thermal_index_min.get_color_at(path.thermal_index_min); break; }
+        case EViewType::ThermalIndexMax:  { color = m_extrusions.ranges.thermal_index_max.get_color_at(path.thermal_index_max); break; }
+        case EViewType::ThermalIndexMean: { color = m_extrusions.ranges.thermal_index_mean.get_color_at(path.thermal_index_mean); break; }
         default: { color = ColorRGBA::WHITE(); break; }
         }
 
@@ -5067,6 +5227,10 @@ public:
             std::string str = _u8L("Acceleration") + std::string(" (mm/s²)");
             imgui->title(str); break; 
             }
+        // Helio thermal index view types
+        case GCodeViewer::EViewType::ThermalIndexMin: { imgui->title(_u8L("Thermal Index (min) %")); break; }
+        case GCodeViewer::EViewType::ThermalIndexMax: { imgui->title(_u8L("Thermal Index (max) %")); break; }
+        case GCodeViewer::EViewType::ThermalIndexMean: { imgui->title(_u8L("Thermal Index (mean) %")); break; }
         case GCodeViewer::EViewType::Tool:
         {
             // calculate used filaments data
@@ -5368,6 +5532,16 @@ public:
         case Slic3r::GUI::GCodeViewer::EViewType::LayerTimeLog:
             append_range(m_extrusions.ranges.layer_duration_log, true);
             break;
+        // Helio thermal index view types
+        case Slic3r::GUI::GCodeViewer::EViewType::ThermalIndexMin:
+            append_range(m_extrusions.ranges.thermal_index_min, 0);
+            break;
+        case Slic3r::GUI::GCodeViewer::EViewType::ThermalIndexMax:
+            append_range(m_extrusions.ranges.thermal_index_max, 0);
+            break;
+        case Slic3r::GUI::GCodeViewer::EViewType::ThermalIndexMean:
+            append_range(m_extrusions.ranges.thermal_index_mean, 0);
+            break;
         default:
             break;
         }
@@ -5619,24 +5793,27 @@ private:
         ImGui::PopStyleVar(1);
     };
 
-    void append_range_item(int i, float value, unsigned int decimals) {
+    void append_range_item(int i, float value, unsigned int decimals, const ColorRGBA& color) {
         char buf[1024];
         ::sprintf(buf, "%.*f", decimals, value);
-        append_item(EItemType::Rect, Range_Colors[i], { { buf , 0} });
+        append_item(EItemType::Rect, color, { { buf , 0} });
     };
 
     void append_range(const GCodeViewer::Extrusions::Range& range, unsigned int decimals) {
+        // Use the correct color array for fixed ranges (thermal index uses Thermal_Index_Range_Colors)
+        const std::vector<ColorRGBA>& colors = range.range_colors.empty() ? Range_Colors : range.range_colors;
+        
         if (range.count == 1)
             // single item use case
-            append_range_item(0, range.min, decimals);
+            append_range_item(0, range.min, decimals, colors[0]);
         else if (range.count == 2) {
-            append_range_item(static_cast<int>(Range_Colors.size()) - 1, range.max, decimals);
-            append_range_item(0, range.min, decimals);
+            append_range_item(static_cast<int>(colors.size()) - 1, range.max, decimals, colors[colors.size() - 1]);
+            append_range_item(0, range.min, decimals, colors[0]);
         }
         else {
             const float step_size = range.step_size();
-            for (int i = static_cast<int>(Range_Colors.size()) - 1; i >= 0; --i) {
-                append_range_item(i, range.get_value_at_step(i), decimals);
+            for (int i = static_cast<int>(colors.size()) - 1; i >= 0; --i) {
+                append_range_item(i, range.get_value_at_step(i), decimals, colors[i]);
             }
         }
     };

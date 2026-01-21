@@ -10,6 +10,8 @@
 #include <boost/beast/version.hpp>
 #include <boost/asio.hpp>
 #include <boost/thread.hpp>
+#include <boost/log/trivial.hpp>
+#include <boost/system/error_code.hpp>
 #include <string>
 #include <set>
 #include <memory>
@@ -110,7 +112,20 @@ private:
         boost::asio::ip::tcp::acceptor     acceptor;
         std::set<std::shared_ptr<session>> sessions;
 
-        IOServer(HttpServer& server) : server(server), acceptor(io_service, {boost::asio::ip::address_v4::loopback(), server.port}) {}
+        IOServer(HttpServer& server) : server(server), acceptor(io_service) {
+            boost::system::error_code ec;
+            acceptor.open(boost::asio::ip::tcp::v4(), ec);
+            if (ec) {
+                BOOST_LOG_TRIVIAL(error) << "IOServer: failed to open acceptor: " << ec.message();
+                throw boost::system::system_error(ec);
+            }
+            acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true), ec);
+            acceptor.bind(boost::asio::ip::tcp::endpoint(boost::asio::ip::address_v4::loopback(), server.port), ec);
+            if (ec) {
+                BOOST_LOG_TRIVIAL(error) << "IOServer: failed to bind to port " << server.port << ": " << ec.message();
+                throw boost::system::system_error(ec);
+            }
+        }
 
         void do_accept();
 

@@ -1,4 +1,4 @@
-﻿#ifndef slic3r_GCodeProcessor_hpp_
+#ifndef slic3r_GCodeProcessor_hpp_
 #define slic3r_GCodeProcessor_hpp_
 
 #include "libslic3r/GCodeReader.hpp"
@@ -14,6 +14,9 @@
 #include <string>
 #include <string_view>
 #include <optional>
+#include <regex>
+#include <iostream>
+#include <boost/algorithm/string.hpp>
 
 namespace Slic3r {
 
@@ -173,7 +176,11 @@ class Print;
             float temperature{ 0.0f }; // Celsius degrees
             float time{ 0.0f }; // s
             float layer_duration{ 0.0f }; // s (layer id before finalize)
-            float acceleration{ 0.0f };  //mm/s2 
+            float acceleration{ 0.0f };  //mm/s2
+            // Helio thermal index (default to -200 to indicate null/no data - will show as grey)
+            float thermal_index_min{ -200.0f };
+            float thermal_index_max{ -200.0f };
+            float thermal_index_mean{ -200.0f }; 
 
             //BBS: arc move related data
             EMovePathType move_path_type{ EMovePathType::Noop_move };
@@ -435,7 +442,87 @@ class Print;
         static const std::string Mm3_Per_Mm_Tag;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
+        // Helio thermal index support
+        struct ThermalIndex
+        {
+            float max;
+            float min;
+            float mean;
+            bool  isNull;
+            ThermalIndex() : min(-200), max(-200), mean(-200), isNull(true) {}
+            ThermalIndex(float minVal, float maxVal, float meanVal) : min(minVal), max(maxVal), mean(meanVal), isNull(false) {}
+        };
+        
+        bool is_helio_gcode() const { return m_is_helio_gcode; }
+        
+        static ThermalIndex parse_helioadditive_comment(const std::string comment, bool& is_helio)
+        {
+            if (boost::algorithm::contains(comment, ";helioadditive=")) {
+                // Try to match with null values first
+                std::regex  regexPatternNull(R"(\bti\.max=(null|NULL),ti\.min=(null|NULL),ti\.mean=(null|NULL)\b)");
+                std::smatch matchNull;
+                if (std::regex_search(comment, matchNull, regexPatternNull)) {
+                    // All values are null
+                    is_helio = true;
+                    return ThermalIndex(); // Returns with isNull=true and values=-200
+                }
+                
+                // Try to match with numeric values
+                std::regex  regexPattern(R"(\bti\.max=(-?[0-9]*\.?[0-9]+|null|NULL),ti\.min=(-?[0-9]*\.?[0-9]+|null|NULL),ti\.mean=(-?[0-9]*\.?[0-9]+|null|NULL)\b)");
+                std::smatch match;
+                if (std::regex_search(comment, match, regexPattern)) {
+                    float maxVal, minVal, meanVal;
+                    bool hasNull = false;
+                    
+                    // Parse max
+                    if (match[1].str() == "null" || match[1].str() == "NULL") {
+                        maxVal = -200.0f;
+                        hasNull = true;
+                    } else {
+                        maxVal = std::stof(match[1].str()) * 100.0f;
+                    }
+                    
+                    // Parse min
+                    if (match[2].str() == "null" || match[2].str() == "NULL") {
+                        minVal = -200.0f;
+                        hasNull = true;
+                    } else {
+                        minVal = std::stof(match[2].str()) * 100.0f;
+                    }
+                    
+                    // Parse mean
+                    if (match[3].str() == "null" || match[3].str() == "NULL") {
+                        meanVal = -200.0f;
+                        hasNull = true;
+                    } else {
+                        meanVal = std::stof(match[3].str()) * 100.0f;
+                    }
+                    
+                    is_helio = true;
+                    if (hasNull) {
+                        // Return with isNull flag set
+                        ThermalIndex result;
+                        result.min = minVal;
+                        result.max = maxVal;
+                        result.mean = meanVal;
+                        result.isNull = true;
+                        return result;
+                    } else {
+                        return ThermalIndex(minVal, maxVal, meanVal);
+                    }
+                } else {
+                    std::cerr << "Error: Unable to parse thermal index values from comment." << std::endl;
+                    return ThermalIndex();
+                }
+
+            } else {
+                return ThermalIndex();
+            }
+        }
+
     private:
+        bool m_is_helio_gcode{ false };
+        ThermalIndex m_thermal_index;
         using AxisCoords = std::array<double, 4>;
         using ExtruderColors = std::vector<unsigned char>;
         using ExtruderTemps = std::vector<float>;
@@ -995,6 +1082,7 @@ class Print;
 
         // Process tags embedded into comments
         void process_tags(const std::string_view comment, bool producers_enabled);
+        void process_helioadditive_comment(const GCodeReader::GCodeLine& line);
         bool process_producers_tags(const std::string_view comment);
 
         //Creality

@@ -345,6 +345,12 @@ bool is_port_in_use(unsigned short port) {
 }
 void HttpServer::start()
 {
+    // Check if already started to prevent multiple bind attempts
+    if (start_http_server) {
+        BOOST_LOG_TRIVIAL(warning) << "HttpServer::start() called but server is already started";
+        return;
+    }
+    
     boost::asio::io_context io_context;
     boost::asio::ip::tcp::socket socket(io_context);
     
@@ -372,13 +378,25 @@ void HttpServer::start()
         set_current_thread_name("http_server");
         try {
             server_ = std::make_unique<IOServer>(*this);
-            server_->acceptor.listen();
+            boost::system::error_code ec;
+            server_->acceptor.listen(boost::asio::socket_base::max_listen_connections, ec);
+            if (ec) {
+                BOOST_LOG_TRIVIAL(error) << "HttpServer: failed to listen on port " << port << ": " << ec.message();
+                start_http_server = false;
+                return;
+            }
 
             server_->do_accept();
             //this->m_video_timer = new boost::asio::deadline_timer(server_->io_service, boost::posix_time::milliseconds(100));
             server_->io_service.run();
-        }catch(boost::system::system_error& e)
-        {
+        } catch (const boost::system::system_error& e) {
+            BOOST_LOG_TRIVIAL(error) << "HttpServer: system_error in http server thread: " << e.what();
+            start_http_server = false;
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "HttpServer: exception in http server thread: " << e.what();
+            start_http_server = false;
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "HttpServer: unknown exception in http server thread";
             start_http_server = false;
         }
     });

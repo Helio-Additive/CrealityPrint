@@ -234,6 +234,32 @@ void BackgroundSlicingProcess::process_fff()
 		//FIX the gcode rename failed issue
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: will start slicing, reset gcode_result %2% firstly") % __LINE__ % m_gcode_result;
 		m_gcode_result->reset();
+		
+		// CRITICAL FIX: Clean up any helio-modified files before starting a new slice
+		// This ensures that when we write the new slice file, it doesn't get confused with helio-modified data
+		// This fixes the bug where deleting an object and inserting a new one would show
+		// results from the first object instead of the second.
+		std::string tmp_gcode_path = this->get_current_plate()->get_tmp_gcode_path();
+		if (!tmp_gcode_path.empty()) {
+			// Delete any original_*.gcode files from previous helio runs
+			boost::filesystem::path gcode_path(tmp_gcode_path);
+			std::string original_path = gcode_path.parent_path().string() + "/original_" + gcode_path.filename().string();
+			if (boost::filesystem::exists(original_path)) {
+				BOOST_LOG_TRIVIAL(info) << "[HELIO] Cleaning up previous helio original file: " << original_path;
+				boost::nowide::remove(original_path.c_str());
+			}
+			// Also delete any simulated_*.gcode files
+			std::string simulated_path = gcode_path.parent_path().string() + "/simulated_" + gcode_path.filename().string();
+			if (boost::filesystem::exists(simulated_path)) {
+				BOOST_LOG_TRIVIAL(info) << "[HELIO] Cleaning up previous helio simulated file: " << simulated_path;
+				boost::nowide::remove(simulated_path.c_str());
+			}
+			// Ensure the current file is removed so it gets recreated fresh
+			if (boost::filesystem::exists(tmp_gcode_path)) {
+				BOOST_LOG_TRIVIAL(info) << "[HELIO] Removing existing gcode file to ensure fresh slice: " << tmp_gcode_path;
+				boost::nowide::remove(tmp_gcode_path.c_str());
+			}
+		}
 
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: gcode_result reseted, will start print::process") % __LINE__;
 		m_print->process();
