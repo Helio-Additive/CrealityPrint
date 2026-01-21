@@ -17602,10 +17602,17 @@ int Plater::get_gcode_layers_count()
 
 bool Plater::get_preview_min_max_value_of_option(int index, float &_min, float &_max)
 {
-    // Stub implementation - CrealityPrint doesn't have the same GCodeViewer renderer
-    // Return default values
+    // Get the GCodeViewer from the preview canvas and query min/max values
+    if (p && p->preview) {
+        GLCanvas3D* canvas = p->preview->get_canvas3d();
+        if (canvas) {
+            const GCodeViewer& gcode_viewer = canvas->get_gcode_viewer();
+            return gcode_viewer.get_min_max_value_of_option(index, _min, _max);
+        }
+    }
+    // Fallback to default values if preview not available
     _min = 0.0f;
-    _max = 500.0f;  // Reasonable default max for speed
+    _max = 0.0f;
     return false;
 }
 

@@ -878,6 +878,7 @@ public:
     bool is_only_gcode_in_preview() const { return m_only_gcode_in_preview; }
 
     EViewType get_view_type() const { return m_view_type; }
+    bool get_min_max_value_of_option(int index, float& _min, float& _max) const;
     void set_view_type(EViewType type, bool reset_feature_type_visible = true) {
         if (type == EViewType::Count)
             type = EViewType::FeatureType;

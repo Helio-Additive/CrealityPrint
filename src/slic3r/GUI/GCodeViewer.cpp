@@ -153,6 +153,48 @@ static std::string get_view_type_string(GCodeViewer::EViewType view_type)
     return "";
 }
 
+bool GCodeViewer::get_min_max_value_of_option(int index, float& _min, float& _max) const
+{
+    switch (static_cast<EViewType>(index)) {
+        case EViewType::Height:
+            _min = m_extrusions.ranges.height.min;
+            _max = m_extrusions.ranges.height.max;
+            return m_extrusions.ranges.height.count > 0;
+        case EViewType::Width:
+            _min = m_extrusions.ranges.width.min;
+            _max = m_extrusions.ranges.width.max;
+            return m_extrusions.ranges.width.count > 0;
+        case EViewType::Feedrate:
+            _min = m_extrusions.ranges.feedrate.min;
+            _max = m_extrusions.ranges.feedrate.max;
+            return m_extrusions.ranges.feedrate.count > 0;
+        case EViewType::FanSpeed:
+            _min = m_extrusions.ranges.fan_speed.min;
+            _max = m_extrusions.ranges.fan_speed.max;
+            return m_extrusions.ranges.fan_speed.count > 0;
+        case EViewType::Temperature:
+            _min = m_extrusions.ranges.temperature.min;
+            _max = m_extrusions.ranges.temperature.max;
+            return m_extrusions.ranges.temperature.count > 0;
+        case EViewType::VolumetricRate:
+            _min = m_extrusions.ranges.volumetric_rate.min;
+            _max = m_extrusions.ranges.volumetric_rate.max;
+            return m_extrusions.ranges.volumetric_rate.count > 0;
+        case EViewType::LayerTime:
+            _min = m_extrusions.ranges.layer_duration.min;
+            _max = m_extrusions.ranges.layer_duration.max;
+            return m_extrusions.ranges.layer_duration.count > 0;
+        case EViewType::Acceleration:
+            _min = m_extrusions.ranges.acceleration.min;
+            _max = m_extrusions.ranges.acceleration.max;
+            return m_extrusions.ranges.acceleration.count > 0;
+        default:
+            _min = 0.0f;
+            _max = 0.0f;
+            return false;
+    }
+}
+
 static unsigned char buffer_id(EMoveType type) {
     return static_cast<unsigned char>(type) - static_cast<unsigned char>(EMoveType::Retract);
 }
