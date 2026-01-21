@@ -1026,8 +1026,6 @@ void MainFrame::show_option(bool show)
             m_print_btn->Hide();
             m_slice_option_btn->Hide();
             m_print_option_btn->Hide();
-            if (split_line_icon) split_line_icon->Hide();
-            if (expand_program_holder) expand_program_holder->Hide();
             Layout();
         }
     } else {
@@ -1036,8 +1034,6 @@ void MainFrame::show_option(bool show)
             m_print_btn->Show();
             m_slice_option_btn->Show();
             m_print_option_btn->Show();
-            if (split_line_icon) split_line_icon->Show();
-            if (expand_program_holder) expand_program_holder->Show();
             Layout();
         }
     }
@@ -1745,94 +1741,6 @@ wxBoxSizer* MainFrame::create_side_tools()
     int em = em_unit();
     wxBoxSizer* sizer = new wxBoxSizer(wxHORIZONTAL);
 
-    /*helio*/
-    split_line_icon = new wxStaticBitmap(this, wxID_ANY, create_scaled_bitmap("topbar_line", this, 22), wxDefaultPosition, wxSize(FromDIP(3), FromDIP(22)), 0);
-    expand_program_holder = new ExpandButtonHolder(this);
-    // Single Helio button - icon changes based on activation state
-    expand_program_holder->addExpandButton(expand_helio_id, "helio_icon");
-    expand_program_holder->addExpandButton(expand_program_id, "expand_program");
-    expand_program_holder->Bind(wxEXPAND_LEFT_DOWN, [=](const wxCommandEvent& e) {
-
-        if (e.GetInt() == expand_helio_id) {
-            // Check if Helio is installed
-            const bool installed = (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") == "true");
-            if (!installed) {
-                // Button should be hidden when uninstalled
-                return;
-            }
-            
-            // Check if PAT exists - if not, show activation flow
-            const std::string pat = Slic3r::HelioQuery::get_helio_pat();
-            if (pat.empty()) {
-                // No PAT - show activation dialog to claim one
-                HelioActivationDialog dlg(wxGetApp().GetTopWindow());
-                const int ret = dlg.ShowModal();
-                
-                // Check if PAT was obtained
-                const std::string new_pat = Slic3r::HelioQuery::get_helio_pat();
-                if (new_pat.empty()) {
-                    // User cancelled or failed to get PAT
-                    return;
-                }
-                
-                // PAT obtained - if user wants to run first optimization, continue below
-                if (!(ret == wxID_OK && dlg.should_run_first_optimization())) {
-                    return;
-                }
-            }
-            
-            // Check if button is enabled (slice result valid)
-            if (!expand_program_holder || !expand_program_holder->IsExpandButtonEnabled(expand_helio_id)) {
-                BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] Helio button clicked but disabled, ignoring";
-                std::cerr << "[HELIO DEBUG] Helio button clicked but disabled, ignoring" << std::endl;
-                return;
-            }
-            
-            // Also check if slice result is valid
-            if (m_plater) {
-                PartPlateList &part_plate_list = m_plater->get_partplate_list();
-                PartPlate *current_plate = part_plate_list.get_curr_plate();
-                if (!current_plate || !current_plate->is_slice_result_valid()) {
-                    BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] Helio button clicked but slice result invalid, ignoring";
-                    std::cerr << "[HELIO DEBUG] Helio button clicked but slice result invalid, ignoring" << std::endl;
-                    return;
-                }
-            }
-            
-            BOOST_LOG_TRIVIAL(info) << "Helio button clicked";
-            Plater* plater = wxGetApp().plater();
-            wxCommandEvent evt(EVT_HELIO_INPUT_DLG);
-            evt.SetEventObject(plater);
-            wxPostEvent(plater, evt);
-        }
-
-        if (e.GetInt() == expand_program_id) {
-            // ExpandCenterDialog dlg;
-            // dlg.ShowModal();
-            BOOST_LOG_TRIVIAL(info) << "Expand program button clicked";
-        }
-        });
-
-    // Show expand_program button (always visible)
-    expand_program_holder->ShowExpandButton(expand_program_id, true);
-    
-    // Set initial Helio button visibility based on installed state
-    // Guard: app_config must exist before accessing
-    bool helio_installed = false;
-    if (wxGetApp().app_config) {
-        helio_installed = wxGetApp().app_config->get("helio_enable") == "true";
-    }
-    expand_program_holder->ShowExpandButton(expand_helio_id, helio_installed);
-    if (helio_installed) {
-        // Installed but no slice result yet - show disabled icon
-        expand_program_holder->updateExpandButtonBitmap(expand_helio_id, "helio_icon_disable");
-        expand_program_holder->EnableExpandButton(expand_helio_id, false);
-        BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] Helio button initially disabled (no slice result yet)";
-        std::cerr << "[HELIO DEBUG] Helio button initially disabled (no slice result yet)" << std::endl;
-    }
-    
-    BOOST_LOG_TRIVIAL(info) << "Helio installed state: " << (helio_installed ? "installed" : "not installed");
-
     /*slice*/
     m_slice_select = eSlicePlate;
     m_print_select = eSendToLocalNetPrinter;
@@ -1853,8 +1761,6 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_option_btn->Enable();
     // sizer->Add(m_publish_btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(1));
     // sizer->Add(FromDIP(15), 0, 0, 0, 0);
-    sizer->Add(expand_program_holder, 0, wxALIGN_CENTER, 0);
-    sizer->Add(FromDIP(10), 0, 0, 0, 0);
     sizer->Add(m_slice_option_btn, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(1));
     sizer->Add(m_slice_btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(1));
     sizer->Add(FromDIP(15), 0, 0, 0, 0);
@@ -2392,46 +2298,7 @@ void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_sl
     if (auto tb = topbar())
         tb->EnableUpload3mf();
 
-    /*for healio*/
-    if (expand_program_holder) {
-        const bool installed = (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") == "true");
-        
-        if (!installed) {
-            // Not installed - button should be hidden
-            expand_program_holder->ShowExpandButton(expand_helio_id, false);
-        } else {
-            // Installed - show button, check if slice result is valid for enabling
-            expand_program_holder->ShowExpandButton(expand_helio_id, true);
-            
-            bool helio_can_run = false;
-            if (m_plater && !enable_slice) {  // Only check if slice button is disabled (slice result is valid)
-                PartPlateList &part_plate_list = m_plater->get_partplate_list();
-                PartPlate *current_plate = part_plate_list.get_curr_plate();
-                if (current_plate && current_plate->is_slice_result_valid()) {
-                    helio_can_run = true;
-                }
-            }
-            
-            bool helio_btn_enable = m_print_enable && helio_can_run && !enable_slice;
-            
-            std::string helio_icon_name;
-            if (!helio_btn_enable) {
-                helio_icon_name = "helio_icon_disable";
-            } else {
-                bool is_dark = wxGetApp().dark_mode();
-                helio_icon_name = is_dark ? "helio_icon" : "helio_icon_dark";
-            }
-            
-            BOOST_LOG_TRIVIAL(warning) << "[HELIO DEBUG] update_slice_print_status() - installed: " << installed 
-                << ", enable_slice: " << enable_slice << ", m_print_enable: " << m_print_enable 
-                << ", helio_btn_enable: " << helio_btn_enable << ", icon: " << helio_icon_name;
-            
-            expand_program_holder->updateExpandButtonBitmap(expand_helio_id, helio_icon_name);
-            expand_program_holder->EnableExpandButton(expand_helio_id, helio_btn_enable);
-        }
-    }
-    
-    // Also update BBLTopbar helio button (only on non-macOS platforms where topbar exists)
+    // Update BBLTopbar helio button
     if (auto tb = topbar())
         tb->EnableHelioButton(!enable_slice && m_print_enable);
 
@@ -2442,22 +2309,7 @@ void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_sl
 
 void MainFrame::UpdateHelioVisibility()
 {
-    const bool installed = (wxGetApp().app_config && wxGetApp().app_config->get("helio_enable") == "true");
-    
-    // Update side panel button visibility
-    if (expand_program_holder) {
-        expand_program_holder->ShowExpandButton(expand_helio_id, installed);
-        if (installed) {
-            // Check if we have a PAT - if so, show normal icon; if not, still show normal icon
-            // (activation happens on first click)
-            const bool has_pat = !Slic3r::HelioQuery::get_helio_pat().empty();
-            // Start with disabled state until slice is ready
-            expand_program_holder->updateExpandButtonBitmap(expand_helio_id, "helio_icon_disable");
-            expand_program_holder->EnableExpandButton(expand_helio_id, false);
-        }
-    }
-    
-    // Update topbar
+    // Update topbar Helio button visibility
     if (m_topbar) {
         m_topbar->UpdateHelioActivationButtons();
     }
@@ -2487,11 +2339,6 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     m_print_btn->Rescale();
     m_slice_option_btn->Rescale();
     m_print_option_btn->Rescale();
-
-    // Helio button rescale
-    if (expand_program_holder) {
-        expand_program_holder->msw_rescale();
-    }
 
     // update Plater
     wxGetApp().plater()->msw_rescale();

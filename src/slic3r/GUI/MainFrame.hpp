@@ -33,7 +33,6 @@ class SideButton;
 class Notebook;
 class wxBookCtrlBase;
 class wxProgressDialog;
-class ExpandButtonHolder;
 
 namespace Slic3r {
 
@@ -426,12 +425,6 @@ public:
     SideButton* m_slice_option_btn{ nullptr };
     SideButton* m_print_btn{ nullptr };
     SideButton* m_print_option_btn{ nullptr };
-
-    // Helio button members
-    wxWindowID expand_program_id = wxNewId();
-    wxWindowID expand_helio_id = wxNewId();
-    wxStaticBitmap* split_line_icon{nullptr};
-    ExpandButtonHolder* expand_program_holder{nullptr};
 
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };
